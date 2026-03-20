@@ -1,11 +1,47 @@
 //! CLI argument definitions parsed by clap.
 
-use clap::{Parser, Subcommand};
+use clap::{ColorChoice, Parser, Subcommand};
+
+use crate::output::ColorWhen;
+
+const LONG_ABOUT: &str = "\
+Grip installs CLI tools declared in grip.toml into a project-local .bin/ directory, \
+similar to how a Python project pins dependencies. A grip.lock file records exact versions \
+and checksums for reproducible installs.";
+
+const AFTER_LONG_HELP: &str = "\
+Examples:
+  grip init
+  grip add BurntSushi/ripgrep
+  grip add jq@1.7.1 --repo jqlang/jq
+  grip install
+  grip check
+  grip outdated
+  grip run jq --version
+  eval \"$(grip env)\"
+
+Documentation: https://github.com/omnone/grip (see README in the repository)";
 
 #[derive(Parser)]
-#[command(name = "grip", about = "Binary dependency manager", version)]
+#[command(
+    name = "grip",
+    about = "Per-project binary dependency manager",
+    long_about = LONG_ABOUT,
+    after_long_help = AFTER_LONG_HELP,
+    version,
+    color = ColorChoice::Always
+)]
 pub struct Cli {
-    /// Override the project root directory (skips the binaries.toml walk).
+    /// Suppress non-essential output (install spinners and decorative lines).
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+    /// Print more detail on errors (e.g. underlying I/O or HTTP messages).
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+    /// When to use colors for grip output (`always` by default; respect NO_COLOR).
+    #[arg(long, global = true, value_name = "WHEN", default_value_t = ColorWhen::Always)]
+    pub color: ColorWhen,
+    /// Override the project root directory (skips the grip.toml walk).
     /// Useful inside containers where the project root is known.
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<std::path::PathBuf>,
@@ -15,40 +51,78 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize binaries.toml in current directory
+    /// Create grip.toml (and .gitignore entry for .bin/) in the current directory
     Init,
-    /// Add a binary entry to binaries.toml
+    /// Add a binary entry to grip.toml
+    ///
+    /// For GitHub, you can pass `owner/repo` as NAME (binary name becomes the last segment),
+    /// or `name@version` to pin a version. On Linux, the default source is often apt/dnf unless
+    /// you pass `--source github`.
     Add {
+        /// Binary name, or `owner/repo` for GitHub, optionally `name@version`
         name: String,
-        #[arg(long)]
+        #[arg(long, help = "github | url | apt | dnf | shell (default: OS-specific)")]
         source: Option<String>,
         #[arg(long)]
         version: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "GitHub `owner/repo` (optional if NAME is already owner/repo)")]
         repo: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Direct download URL (required for --source url)")]
         url: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Package name for apt/dnf (defaults to binary name)")]
         package: Option<String>,
+        #[arg(
+            long,
+            help = "On-PATH command for apt/dnf when it differs from NAME (e.g. ripgrep → rg)"
+        )]
+        binary: Option<String>,
     },
-    /// Install all binaries from binaries.toml
+    /// Install all binaries from grip.toml into .bin/ and update grip.lock
+    #[command(visible_alias = "sync")]
     Install {
-        #[arg(long, help = "Fail if lock file would change (CI mode)")]
+        /// Fail if the lock file would change (for CI)
+        #[arg(long)]
         locked: bool,
-        #[arg(long, help = "Verify SHA256 of each binary against the lock file")]
+        /// Re-verify SHA256 of on-disk binaries against the lock file
+        #[arg(long)]
         verify: bool,
-        #[arg(long, help = "Only install binaries with this tag")]
+        /// Only install entries that include this tag
+        #[arg(long)]
         tag: Option<String>,
     },
     /// Run a command with .bin/ prepended to PATH
     Run {
-        #[arg(trailing_var_arg = true)]
+        #[arg(required = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
-    /// List installed binaries
+    /// Verify `.bin/` matches grip.lock (version pins + SHA256); does not install or modify files
+    Check {
+        /// Only check entries that include this tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// List installed binaries from grip.lock
     List,
-    /// Update a binary to its latest version
+    /// Re-install one binary from the manifest and refresh its lock entry
     Update {
         name: String,
+    },
+    /// Check whether newer versions of installed binaries are available
+    Outdated {
+        /// Only check entries that include this tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Print shell code to add .bin/ to PATH (for use with eval)
+    ///
+    /// Bash / zsh — add to ~/.bashrc or ~/.zshrc:
+    ///   eval "$(grip env)"
+    ///
+    /// Fish — add to ~/.config/fish/config.fish:
+    ///   grip env --shell fish | source
+    Env {
+        /// Shell type: bash, zsh, fish, sh (auto-detected from $SHELL if omitted)
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
     },
 }

@@ -12,6 +12,7 @@ use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::{BinaryEntry, GithubEntry};
 use crate::error::GripError;
+use crate::output;
 use crate::platform::Platform;
 
 /// Downloads and extracts a binary from a GitHub release asset.
@@ -72,6 +73,7 @@ impl SourceAdapter for GithubAdapter {
         bin_dir: &Path,
         client: &Client,
         pb: ProgressBar,
+        colored: bool,
     ) -> Result<LockEntry, GripError> {
         let BinaryEntry::Github(g) = entry else {
             return Err(GripError::Other("expected github entry".into()));
@@ -134,6 +136,7 @@ impl SourceAdapter for GithubAdapter {
             name,
             asset_size,
             &pb,
+            colored,
         )
         .await?;
 
@@ -141,7 +144,10 @@ impl SourceAdapter for GithubAdapter {
         pb.set_message(format!("{name}  extracting..."));
         extract_binary(tmp.path(), &asset_name, g, name, bin_dir)?;
 
-        pb.finish_with_message(format!("\x1b[32m✓\x1b[0m {name}  {version}"));
+        pb.finish_with_message(format!(
+            "{} {name}  {version}",
+            output::success_checkmark(colored)
+        ));
         Ok(LockEntry {
             name: name.to_string(),
             version,
@@ -180,18 +186,29 @@ async fn download_with_progress(
     label: &str,
     size: u64,
     pb: &ProgressBar,
+    colored: bool,
 ) -> Result<String, GripError> {
     if size > 0 {
         pb.set_length(size);
+        let tpl = if colored {
+            "  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+        } else {
+            "  {prefix} {msg} [{bar:40}] {bytes}/{total_bytes} ({eta})"
+        };
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .template(tpl)
                 .unwrap()
                 .progress_chars("█▓░"),
         );
     } else {
+        let tpl = if colored {
+            "  {prefix:.bold.dim} {spinner:.cyan} {msg} {bytes}"
+        } else {
+            "  {prefix} {spinner} {msg} {bytes}"
+        };
         pb.set_style(
-            ProgressStyle::with_template("  {prefix:.bold.dim} {spinner:.cyan} {msg} {bytes}")
+            ProgressStyle::with_template(tpl)
                 .unwrap()
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
@@ -207,8 +224,13 @@ async fn download_with_progress(
     }
 
     // Restore spinner style for the extract step
+    let tpl = if colored {
+        "  {prefix:.bold.dim} {spinner:.cyan} {msg}"
+    } else {
+        "  {prefix} {spinner} {msg}"
+    };
     pb.set_style(
-        ProgressStyle::with_template("  {prefix:.bold.dim} {spinner:.cyan} {msg}")
+        ProgressStyle::with_template(tpl)
             .unwrap()
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );

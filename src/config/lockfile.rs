@@ -1,11 +1,11 @@
-//! `binaries.lock` lock file types and I/O.
+//! `grip.lock` lock file types and I/O.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use crate::error::GripError;
 
-/// The top-level `binaries.lock` document — a list of installed binary records.
+/// The top-level `grip.lock` document — a list of installed binary records.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct LockFile {
     #[serde(default, rename = "binary")]
@@ -15,7 +15,7 @@ pub struct LockFile {
 /// A single record in the lock file describing an installed binary.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LockEntry {
-    /// Logical name of the binary (matches the key in `binaries.toml`).
+    /// Logical name of the binary (matches the key in `grip.toml`).
     pub name: String,
     /// Installed version string.
     pub version: String,
@@ -30,7 +30,7 @@ pub struct LockEntry {
 }
 
 impl LockFile {
-    /// Load `binaries.lock` from `path`. Returns an empty lock file if the path does not exist.
+    /// Load `grip.lock` from `path`. Returns an empty lock file if the path does not exist.
     pub fn load(path: &Path) -> Result<Self, GripError> {
         if !path.exists() {
             return Ok(LockFile::default());

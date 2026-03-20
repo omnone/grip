@@ -1,14 +1,15 @@
-//! `binaries.toml` manifest types and loading/saving logic.
+//! `grip.toml` manifest types and loading/saving logic.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use crate::error::GripError;
 
-/// The top-level `binaries.toml` document.
+/// The top-level `grip.toml` document.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Manifest {
     /// Map of logical binary name → installation entry.
+    #[serde(default)]
     pub binaries: IndexMap<String, BinaryEntry>,
 }
 
@@ -66,6 +67,9 @@ pub enum BinaryEntry {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DnfEntry {
     pub package: String,
+    /// On-PATH command name when it differs from the manifest key (e.g. package `ripgrep` → `rg`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
     pub version: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
@@ -75,6 +79,9 @@ pub struct DnfEntry {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AptEntry {
     pub package: String,
+    /// On-PATH command name when it differs from the manifest key (e.g. `fd-find` → `fd`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
     pub version: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
@@ -158,7 +165,7 @@ impl BinaryEntry {
 }
 
 impl Manifest {
-    /// Load and parse a `binaries.toml` from `path`.
+    /// Load and parse a `grip.toml` from `path`.
     pub fn load(path: &Path) -> Result<Self, GripError> {
         let content = std::fs::read_to_string(path)?;
         let manifest: Manifest = toml::from_str(&content)?;
@@ -180,11 +187,11 @@ impl Manifest {
     }
 }
 
-/// Walk up from `start` to find the directory containing `binaries.toml`.
+/// Walk up from `start` to find the directory containing `grip.toml`.
 pub fn find_manifest_dir(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        if current.join("binaries.toml").exists() {
+        if current.join("grip.toml").exists() {
             return Some(current);
         }
         if !current.pop() {

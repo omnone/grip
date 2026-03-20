@@ -1,3 +1,4 @@
 /target
 .bin/
-binaries.lock
+grip.lock
+grip.toml

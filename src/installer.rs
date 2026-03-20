@@ -14,7 +14,15 @@ use crate::checksum::sha256_file;
 use crate::config::lockfile::LockFile;
 use crate::config::manifest::{find_manifest_dir, Manifest};
 use crate::error::GripError;
+use crate::output;
 use crate::platform::Platform;
+
+/// UI options for [`run_install`].
+#[derive(Clone, Copy, Debug)]
+pub struct InstallOptions {
+    pub quiet: bool,
+    pub colored: bool,
+}
 
 /// Summary of a completed install run.
 pub struct InstallResult {
@@ -34,7 +42,13 @@ pub struct InstallResult {
 ///   change.
 /// - `verify`: re-verify the SHA-256 of already-installed binaries against the lock file.
 /// - `tag`: when `Some`, only install entries that carry this tag.
-pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Option<PathBuf>) -> Result<InstallResult, GripError> {
+pub async fn run_install(
+    locked: bool,
+    verify: bool,
+    tag: Option<&str>,
+    root: Option<PathBuf>,
+    ui: InstallOptions,
+) -> Result<InstallResult, GripError> {
     let project_root = match root {
         Some(r) => r,
         None => {
@@ -43,8 +57,8 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
         }
     };
 
-    let manifest_path = project_root.join("binaries.toml");
-    let lock_path = project_root.join("binaries.lock");
+    let manifest_path = project_root.join("grip.toml");
+    let lock_path = project_root.join("grip.lock");
     let bin_dir = ensure_bin_dir(&project_root)?;
 
     let manifest = Manifest::load(&manifest_path)?;
@@ -113,11 +127,11 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
 
     // Set up multi-progress display.
     let mp = MultiProgress::new();
-    let spinner_style = ProgressStyle::with_template("  {prefix:.bold.dim} {spinner:.cyan} {msg}")
+    let spinner_style = ProgressStyle::with_template(output::install_spinner_template(ui.colored))
         .unwrap()
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]);
 
-    if total > 0 {
+    if total > 0 && !ui.quiet {
         let noun = if total == 1 { "binary" } else { "binaries" };
         mp.println(format!("  Installing {total} {noun}...\n")).ok();
     }
@@ -126,8 +140,14 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
     let mut futures: FuturesUnordered<_> = FuturesUnordered::new();
 
     for (idx, (name, entry, post_install)) in to_install.into_iter().enumerate() {
-        let pb = mp.add(ProgressBar::new_spinner());
-        pb.set_style(spinner_style.clone());
+        let pb = if ui.quiet {
+            ProgressBar::hidden()
+        } else {
+            mp.add(ProgressBar::new_spinner())
+        };
+        if !ui.quiet {
+            pb.set_style(spinner_style.clone());
+        }
         pb.set_prefix(format!("[{}/{}]", idx + 1, total));
         pb.set_message(format!("{name}  resolving..."));
         pb.enable_steady_tick(Duration::from_millis(80));
@@ -146,11 +166,15 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
 
         let bin_dir = bin_dir.clone();
         let client = client.clone();
+        let colored = ui.colored;
 
         futures.push(async move {
             let adapter = get_adapter(&entry);
             if !adapter.is_supported() {
-                pb.finish_with_message(format!("\x1b[2m-\x1b[0m {name}  skipped — unsupported platform"));
+                pb.finish_with_message(format!(
+                    "{} {name}  skipped — unsupported platform",
+                    output::dim(colored, "-")
+                ));
                 return (
                     name.clone(),
                     post_install,
@@ -159,7 +183,9 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
                     }),
                 );
             }
-            let res = adapter.install(&name, &entry, &bin_dir, &client, pb).await;
+            let res = adapter
+                .install(&name, &entry, &bin_dir, &client, pb, colored)
+                .await;
             (name, post_install, res)
         });
     }
@@ -174,10 +200,22 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
                         .status();
                     match status {
                         Ok(s) if !s.success() => {
-                            mp.println(format!("  \x1b[33m⚠\x1b[0m  post_install failed for {name}: {cmd}")).ok();
+                            if ui.quiet {
+                                eprintln!("warning: post_install failed for {name}: {cmd}");
+                            } else {
+                                let g = output::warn_glyph(ui.colored);
+                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
+                                    .ok();
+                            }
                         }
                         Err(e) => {
-                            mp.println(format!("  \x1b[33m⚠\x1b[0m  post_install error for {name}: {e}")).ok();
+                            if ui.quiet {
+                                eprintln!("warning: post_install error for {name}: {e}");
+                            } else {
+                                let g = output::warn_glyph(ui.colored);
+                                mp.println(format!("  {g}  post_install error for {name}: {e}"))
+                                    .ok();
+                            }
                         }
                         _ => {}
                     }
@@ -191,7 +229,8 @@ pub async fn run_install(locked: bool, verify: bool, tag: Option<&str>, root: Op
             Err(e) => {
                 if let Some(pb) = pb_map.get(&name) {
                     if !pb.is_finished() {
-                        pb.finish_with_message(format!("\x1b[31m✗\x1b[0m {name}  failed"));
+                        let x = output::fail_glyph(ui.colored);
+                        pb.finish_with_message(format!("{x} {name}  failed"));
                     }
                 }
                 let required = required_flags.get(&name).copied().unwrap_or(true);

@@ -11,6 +11,7 @@ use crate::bin_dir::{sha256_of_installed, symlink_binary};
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::BinaryEntry;
 use crate::error::GripError;
+use crate::output;
 use crate::platform::Platform;
 
 /// Installs packages with `apt-get install` (falling back to `sudo apt-get install`) and
@@ -43,6 +44,7 @@ impl SourceAdapter for AptAdapter {
         bin_dir: &Path,
         _client: &Client,
         pb: ProgressBar,
+        colored: bool,
     ) -> Result<LockEntry, GripError> {
         if !self.is_supported() {
             return Err(GripError::UnsupportedPlatform {
@@ -61,31 +63,58 @@ impl SourceAdapter for AptAdapter {
         };
         let pkg = pkg.trim_end_matches('=').to_string();
 
+        let cmd_name = a.binary.as_deref().unwrap_or(name);
+
         // If already on PATH, skip installation and just symlink
-        let which_pre = Command::new("which").arg(name).output()?;
+        let which_pre = Command::new("which").arg(cmd_name).output()?;
         if !which_pre.status.success() {
             pb.set_message(format!("{name}  updating package index..."));
+            // `-y` + noninteractive frontend avoid blocking prompts; stderr must be visible if
+            // something still asks (e.g. conffile) or errors.
             let updated = Command::new("apt-get")
-                .args(["update"])
-                .stdout(Stdio::null()).stderr(Stdio::null())
-                .status().map(|s| s.success()).unwrap_or(false);
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .args(["-y", "update"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
             if !updated {
-                Command::new("sudo").args(["apt-get", "update"])
-                    .stdout(Stdio::null()).stderr(Stdio::null())
-                    .status().ok();
+                Command::new("sudo")
+                    .args([
+                        "env",
+                        "DEBIAN_FRONTEND=noninteractive",
+                        "apt-get",
+                        "-y",
+                        "update",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
+                    .status()
+                    .ok();
             }
 
             pb.set_message(format!("{name}  installing via apt..."));
             let status = Command::new("apt-get")
+                .env("DEBIAN_FRONTEND", "noninteractive")
                 .args(["install", "-y", &pkg])
-                .stdout(Stdio::null()).stderr(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
                 .status();
 
             let ok = match status {
                 Ok(s) if s.success() => true,
                 _ => Command::new("sudo")
-                    .args(["apt-get", "install", "-y", &pkg])
-                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .args([
+                        "env",
+                        "DEBIAN_FRONTEND=noninteractive",
+                        "apt-get",
+                        "install",
+                        "-y",
+                        &pkg,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false),
@@ -99,15 +128,23 @@ impl SourceAdapter for AptAdapter {
             }
         }
 
-        let which = Command::new("which").arg(name).output()?;
-        if which.status.success() {
-            let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
-            let target = std::path::PathBuf::from(&path_str);
-            symlink_binary(&target, bin_dir, name)?;
+        let which = Command::new("which").arg(cmd_name).output()?;
+        if !which.status.success() {
+            return Err(GripError::CommandFailed(format!(
+                "installed package `{}` but `{cmd_name}` is not on PATH; \
+                 set `binary = \"...\"` in grip.toml if the executable uses another name",
+                a.package
+            )));
         }
+        let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
+        let target = std::path::PathBuf::from(&path_str);
+        symlink_binary(&target, bin_dir, name)?;
 
         let version = installed_version(&a.package).unwrap_or_else(|| "unknown".to_string());
-        pb.finish_with_message(format!("\x1b[32m✓\x1b[0m {name}  {version}"));
+        pb.finish_with_message(format!(
+            "{} {name}  {version}",
+            output::success_checkmark(colored)
+        ));
         Ok(LockEntry {
             name: name.to_string(),
             version,

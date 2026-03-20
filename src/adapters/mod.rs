@@ -33,6 +33,7 @@ pub trait SourceAdapter: Send + Sync {
         bin_dir: &Path,
         client: &Client,
         pb: ProgressBar,
+        colored: bool,
     ) -> Result<LockEntry, GripError>;
     /// Resolve the latest available version string without installing.
     async fn resolve_latest(

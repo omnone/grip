@@ -12,6 +12,7 @@ use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::BinaryEntry;
 use crate::error::GripError;
+use crate::output;
 
 /// Downloads a binary (or archive) from a URL, optionally verifies its SHA-256, and installs it.
 /// Supported on all platforms.
@@ -41,6 +42,7 @@ impl SourceAdapter for UrlAdapter {
         bin_dir: &Path,
         client: &Client,
         pb: ProgressBar,
+        colored: bool,
     ) -> Result<LockEntry, GripError> {
         let BinaryEntry::Url(u) = entry else {
             return Err(GripError::Other("expected url entry".into()));
@@ -52,9 +54,14 @@ impl SourceAdapter for UrlAdapter {
 
         if total > 0 {
             pb.set_length(total);
+            let tpl = if colored {
+                "  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+            } else {
+                "  {prefix} {msg} [{bar:40}] {bytes}/{total_bytes} ({eta})"
+            };
             pb.set_style(
                 ProgressStyle::default_bar()
-                    .template("  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .template(tpl)
                     .unwrap()
                     .progress_chars("█▓░"),
             );
@@ -105,7 +112,10 @@ impl SourceAdapter for UrlAdapter {
         }
 
         let version: String = sha256.chars().take(12).collect();
-        pb.finish_with_message(format!("\x1b[32m✓\x1b[0m {name}  {version}"));
+        pb.finish_with_message(format!(
+            "{} {name}  {version}",
+            output::success_checkmark(colored)
+        ));
         Ok(LockEntry {
             name: name.to_string(),
             version,
