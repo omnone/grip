@@ -38,13 +38,6 @@ impl<W: Write> Write for ChecksumWriter<W> {
     }
 }
 
-/// Compute the hex-encoded SHA-256 digest of an in-memory byte slice.
-pub fn compute_sha256(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
-}
-
 /// Compute SHA256 of a file on disk by streaming it.
 pub fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
     use std::io::Read;

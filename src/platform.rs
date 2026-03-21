@@ -46,11 +46,6 @@ impl Platform {
         self.os == OS::Linux
     }
 
-    /// Returns `true` when running on macOS.
-    pub fn is_macos(&self) -> bool {
-        self.os == OS::MacOS
-    }
-
     /// Returns a lowercase OS identifier string compatible with GitHub release asset names
     /// (e.g. `"linux"`, `"darwin"`, `"windows"`).
     pub fn os_str(&self) -> &str {

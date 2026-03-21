@@ -25,9 +25,6 @@ pub enum GripError {
     /// No `grip.toml` was found in the current directory or any parent.
     #[error("Manifest not found (no grip.toml in current or parent dirs)")]
     ManifestNotFound,
-    /// `--locked` mode detected that the lock file would change.
-    #[error("Lock file changed in --locked mode")]
-    LockChanged,
     /// A subprocess exited with a non-zero status.
     #[error("Command failed: {0}")]
     CommandFailed(String),
@@ -60,9 +57,6 @@ impl GripError {
         match self {
             GripError::ManifestNotFound => Some(
                 "Run `grip init` in your project directory, or change to a directory that contains grip.toml.",
-            ),
-            GripError::LockChanged => Some(
-                "Run `grip install` without `--locked` to refresh grip.lock, then commit the updated lock file.",
             ),
             GripError::UnknownAdapter(_) => Some("Valid sources: github, url, apt, dnf, shell."),
             GripError::TomlParse(_) => Some("Fix the syntax in grip.toml."),
@@ -104,9 +98,6 @@ impl GripError {
             GripError::Http(e) if !verbose => format!("HTTP error: {e}"),
             GripError::ManifestNotFound => {
                 "Could not find grip.toml in the current directory or any parent.".to_string()
-            }
-            GripError::LockChanged => {
-                "The lock file is out of date for `--locked` mode.".to_string()
             }
             _ => self.to_string(),
         }

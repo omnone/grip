@@ -14,7 +14,7 @@ Examples:
   grip init
   grip add BurntSushi/ripgrep
   grip add jq@1.7.1 --repo jqlang/jq
-  grip install
+  grip sync
   grip check
   grip outdated
   grip run jq --version
@@ -79,9 +79,8 @@ pub enum Commands {
         #[arg(long, help = "Add to [libraries] instead of [binaries] (apt/dnf only)")]
         library: bool,
     },
-    /// Install all binaries from grip.toml into .bin/ and update grip.lock
-    #[command(visible_alias = "sync")]
-    Install {
+    /// Download and install any missing binaries from grip.toml into .bin/
+    Sync {
         /// Fail if the lock file would change (for CI)
         #[arg(long)]
         locked: bool,

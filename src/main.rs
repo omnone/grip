@@ -61,6 +61,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             binary,
             library,
         } => {
+            let root_for_sync = root.clone();
             cmd_add(
                 name,
                 source,
@@ -73,8 +74,52 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 root,
                 &cfg,
             )?;
+            let ui = installer::InstallOptions {
+                quiet: cfg.quiet,
+                colored: color_err,
+            };
+            let start = std::time::Instant::now();
+            let result =
+                installer::run_install(false, false, None, root_for_sync, ui).await?;
+            let elapsed = start.elapsed().as_secs_f64();
+            if cfg.quiet {
+                for (name, err) in &result.failed {
+                    eprintln!("error: {name}: {err}");
+                }
+            } else {
+                for (name, err) in &result.warned {
+                    let g = output::warn_glyph(color_err);
+                    eprintln!("  {g}  {name}: {err}");
+                }
+                for (name, err) in &result.failed {
+                    let x = output::fail_glyph(color_err);
+                    eprintln!("  {x}  {name}: {err}");
+                }
+                let n_installed = result.installed.len();
+                let n_skipped = result.skipped.len();
+                let n_failed = result.failed.len() + result.warned.len();
+                if n_installed == 0 && n_failed == 0 {
+                    let dim = output::dim(color_out, "All up to date");
+                    println!("\n  {dim}  ({n_skipped} skipped, {elapsed:.1}s)");
+                } else {
+                    let mut parts: Vec<String> = Vec::new();
+                    if n_installed > 0 {
+                        parts.push(output::green(color_out, &format!("{n_installed} installed")));
+                    }
+                    if n_skipped > 0 {
+                        parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
+                    }
+                    if n_failed > 0 {
+                        parts.push(output::red(color_out, &format!("{n_failed} failed")));
+                    }
+                    println!("\n  {}  ({elapsed:.1}s)", parts.join(", "));
+                }
+            }
+            if !result.failed.is_empty() {
+                std::process::exit(1);
+            }
         }
-        Commands::Install { locked, verify, tag } => {
+        Commands::Sync { locked, verify, tag } => {
             let start = std::time::Instant::now();
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
@@ -252,7 +297,7 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
                 "hint: {}",
                 output::dim(
                     color,
-                    "Add tools with `grip add <name>` then run `grip install`.",
+                    "Add tools with `grip add <name>` then run `grip sync`.",
                 )
             );
         }
@@ -307,7 +352,7 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
     if !cfg.quiet {
         println!(
             "hint: {}",
-            output::dim(color, "Run `grip add <name>` then `grip install` to populate .bin/.")
+            output::dim(color, "Run `grip add <name>` then `grip sync` to populate .bin/.")
         );
     }
 
@@ -610,7 +655,7 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
             println!("No binaries or libraries installed yet.");
             println!(
                 "hint: {}",
-                output::dim(color, "Run `grip install` to install everything from grip.toml.")
+                output::dim(color, "Run `grip sync` to install everything from grip.toml.")
             );
         }
         return Ok(());
@@ -909,7 +954,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
     for name in manifest.binaries.keys() {
         if lock.get(name).is_none() {
             issues.push(format!(
-                "binary '{name}' is declared in grip.toml but not installed (run `grip install`)"
+                "binary '{name}' is declared in grip.toml but not installed (run `grip sync`)"
             ));
         }
     }
@@ -918,7 +963,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
     for name in manifest.libraries.keys() {
         if lock.get_library(name).is_none() {
             issues.push(format!(
-                "library '{name}' is declared in grip.toml but not installed (run `grip install`)"
+                "library '{name}' is declared in grip.toml but not installed (run `grip sync`)"
             ));
         }
     }
@@ -928,7 +973,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
         let bin_path = bin_dir.join(&entry.name);
         if !bin_path.exists() && bin_path.symlink_metadata().is_err() {
             issues.push(format!(
-                "binary '{}' is in grip.lock but missing from .bin/ (run `grip install`)",
+                "binary '{}' is in grip.lock but missing from .bin/ (run `grip sync`)",
                 entry.name
             ));
         }
@@ -942,7 +987,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
                 if let Ok(got) = crate::checksum::sha256_file(&bin_path) {
                     if &got != expected {
                         issues.push(format!(
-                            "binary '{}' checksum mismatch — binary may have been modified (run `grip install --verify`)",
+                            "binary '{}' checksum mismatch — binary may have been modified (run `grip sync --verify`)",
                             entry.name
                         ));
                     }
@@ -968,7 +1013,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
             };
             if !on_system {
                 issues.push(format!(
-                    "library '{}' is in grip.lock but not found on the system (run `grip install`)",
+                    "library '{}' is in grip.lock but not found on the system (run `grip sync`)",
                     entry.name
                 ));
             }
