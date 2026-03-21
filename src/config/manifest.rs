@@ -11,6 +11,9 @@ pub struct Manifest {
     /// Map of logical binary name → installation entry.
     #[serde(default)]
     pub binaries: IndexMap<String, BinaryEntry>,
+    /// Map of logical library name → library installation entry (no executable required).
+    #[serde(default)]
+    pub libraries: IndexMap<String, LibraryEntry>,
 }
 
 /// Metadata shared across all entry types, flattened into the TOML table.
@@ -164,6 +167,42 @@ impl BinaryEntry {
     }
 }
 
+/// A library dependency (no executable), discriminated by the `source` field in TOML.
+/// Only system package manager sources are supported since other sources produce executables.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "source", rename_all = "lowercase")]
+pub enum LibraryEntry {
+    Apt(LibAptEntry),
+    Dnf(LibDnfEntry),
+}
+
+/// Library entry installed via `apt-get` (Debian / Ubuntu).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LibAptEntry {
+    pub package: String,
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub meta: CommonMeta,
+}
+
+/// Library entry installed via `dnf` (Fedora / RHEL).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LibDnfEntry {
+    pub package: String,
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub meta: CommonMeta,
+}
+
+impl LibraryEntry {
+    pub fn meta(&self) -> &CommonMeta {
+        match self {
+            LibraryEntry::Apt(e) => &e.meta,
+            LibraryEntry::Dnf(e) => &e.meta,
+        }
+    }
+}
+
 impl Manifest {
     /// Load and parse a `grip.toml` from `path`.
     pub fn load(path: &Path) -> Result<Self, GripError> {
@@ -183,6 +222,7 @@ impl Manifest {
     pub fn empty() -> Self {
         Manifest {
             binaries: IndexMap::new(),
+            libraries: IndexMap::new(),
         }
     }
 }

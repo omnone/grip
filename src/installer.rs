@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::adapters::get_adapter;
+use crate::adapters::{apt as apt_adapter, dnf as dnf_adapter, get_adapter};
 use crate::bin_dir::ensure_bin_dir;
 use crate::checksum::sha256_file;
 use crate::config::lockfile::LockFile;
-use crate::config::manifest::{find_manifest_dir, Manifest};
+use crate::config::manifest::{find_manifest_dir, LibraryEntry, Manifest};
 use crate::error::GripError;
 use crate::output;
 use crate::platform::Platform;
@@ -243,9 +243,129 @@ pub async fn run_install(
         }
     }
 
+    // ── Library install pass ────────────────────────────────────────────────
+    let library_required_flags: HashMap<String, bool> = manifest
+        .libraries
+        .iter()
+        .map(|(n, e)| (n.clone(), e.meta().is_required()))
+        .collect();
+
+    let mut libs_to_install: Vec<(String, LibraryEntry, Option<String>)> = Vec::new();
+
+    for (name, entry) in &manifest.libraries {
+        let meta = entry.meta();
+
+        if !meta.matches_platform(platform.os_str()) {
+            outcome.skipped.push(name.clone());
+            continue;
+        }
+
+        if let Some(t) = tag {
+            if !meta.has_tag(t) {
+                continue;
+            }
+        }
+
+        if lock.get_library(name).is_some() {
+            outcome.skipped.push(name.clone());
+            continue;
+        }
+
+        libs_to_install.push((name.clone(), entry.clone(), meta.post_install.clone()));
+    }
+
+    let lib_total = libs_to_install.len();
+    if lib_total > 0 && !ui.quiet {
+        let noun = if lib_total == 1 { "library" } else { "libraries" };
+        mp.println(format!("  Installing {lib_total} {noun}...\n")).ok();
+    }
+
+    // Libraries are installed sequentially to avoid package manager lock contention.
+    for (idx, (name, entry, post_install)) in libs_to_install.into_iter().enumerate() {
+        let pb = if ui.quiet {
+            indicatif::ProgressBar::hidden()
+        } else {
+            mp.add(indicatif::ProgressBar::new_spinner())
+        };
+        if !ui.quiet {
+            pb.set_style(spinner_style.clone());
+        }
+        pb.set_prefix(format!("[{}/{}]", idx + 1, lib_total));
+        pb.set_message(format!("{name}  resolving..."));
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        let result = match &entry {
+            LibraryEntry::Apt(a) => {
+                if !platform.is_linux() {
+                    Err(GripError::UnsupportedPlatform { adapter: "apt".to_string() })
+                } else {
+                    apt_adapter::install_apt_library(&name, a, pb.clone(), ui.colored).await
+                }
+            }
+            LibraryEntry::Dnf(d) => {
+                if !platform.is_linux() || !which_exists("dnf") {
+                    Err(GripError::UnsupportedPlatform { adapter: "dnf".to_string() })
+                } else {
+                    dnf_adapter::install_dnf_library(&name, d, pb.clone(), ui.colored).await
+                }
+            }
+        };
+
+        match result {
+            Ok(lock_entry) => {
+                if let Some(cmd) = post_install {
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .status();
+                    match status {
+                        Ok(s) if !s.success() => {
+                            if ui.quiet {
+                                eprintln!("warning: post_install failed for {name}: {cmd}");
+                            } else {
+                                let g = output::warn_glyph(ui.colored);
+                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}")).ok();
+                            }
+                        }
+                        Err(e) => {
+                            if ui.quiet {
+                                eprintln!("warning: post_install error for {name}: {e}");
+                            } else {
+                                let g = output::warn_glyph(ui.colored);
+                                mp.println(format!("  {g}  post_install error for {name}: {e}")).ok();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                outcome.installed.push(name);
+                lock.upsert_library(lock_entry);
+            }
+            Err(GripError::UnsupportedPlatform { .. }) => {
+                outcome.skipped.push(name);
+            }
+            Err(e) => {
+                let required = library_required_flags.get(&name).copied().unwrap_or(true);
+                if required {
+                    outcome.failed.push((name, e.to_string()));
+                } else {
+                    outcome.warned.push((name, e.to_string()));
+                }
+            }
+        }
+    }
+
     if !locked || !outcome.installed.is_empty() {
         lock.save(&lock_path)?;
     }
 
     Ok(outcome)
+}
+
+fn which_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }

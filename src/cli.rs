@@ -53,11 +53,11 @@ pub struct Cli {
 pub enum Commands {
     /// Create grip.toml (and .gitignore entry for .bin/) in the current directory
     Init,
-    /// Add a binary entry to grip.toml
+    /// Add a binary or library entry to grip.toml
     ///
     /// For GitHub, you can pass `owner/repo` as NAME (binary name becomes the last segment),
     /// or `name@version` to pin a version. On Linux, the default source is often apt/dnf unless
-    /// you pass `--source github`.
+    /// you pass `--source github`. Use `--library` to add to [libraries] instead of [binaries].
     Add {
         /// Binary name, or `owner/repo` for GitHub, optionally `name@version`
         name: String,
@@ -76,6 +76,8 @@ pub enum Commands {
             help = "On-PATH command for apt/dnf when it differs from NAME (e.g. ripgrep → rg)"
         )]
         binary: Option<String>,
+        #[arg(long, help = "Add to [libraries] instead of [binaries] (apt/dnf only)")]
+        library: bool,
     },
     /// Install all binaries from grip.toml into .bin/ and update grip.lock
     #[command(visible_alias = "sync")]

@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use crate::adapters::SourceAdapter;
 use crate::bin_dir::{sha256_of_installed, symlink_binary};
 use crate::config::lockfile::LockEntry;
-use crate::config::manifest::BinaryEntry;
+use crate::config::manifest::{BinaryEntry, LibAptEntry};
 use crate::error::GripError;
 use crate::output;
 use crate::platform::Platform;
@@ -154,6 +154,94 @@ impl SourceAdapter for AptAdapter {
             installed_at: chrono::Utc::now(),
         })
     }
+}
+
+/// Install a library package via apt-get without symlinking any binary.
+pub async fn install_apt_library(
+    name: &str,
+    entry: &LibAptEntry,
+    pb: ProgressBar,
+    colored: bool,
+) -> Result<LockEntry, GripError> {
+    let pkg = if let Some(v) = &entry.version {
+        format!("{}={}", entry.package, v)
+    } else {
+        entry.package.clone()
+    };
+    let pkg = pkg.trim_end_matches('=').to_string();
+
+    // Check if already installed via dpkg
+    let already_installed = Command::new("dpkg-query")
+        .args(["-W", "-f=${Status}", &entry.package])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
+        .unwrap_or(false);
+
+    if !already_installed {
+        pb.set_message(format!("{name}  updating package index..."));
+        let updated = Command::new("apt-get")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .args(["-y", "update"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !updated {
+            Command::new("sudo")
+                .args(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "update"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()
+                .ok();
+        }
+
+        pb.set_message(format!("{name}  installing via apt..."));
+        let ok = Command::new("apt-get")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .args(["install", "-y", &pkg])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            let ok2 = Command::new("sudo")
+                .args([
+                    "env",
+                    "DEBIAN_FRONTEND=noninteractive",
+                    "apt-get",
+                    "install",
+                    "-y",
+                    &pkg,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok2 {
+                return Err(GripError::CommandFailed(format!(
+                    "apt-get install {} (try running: sudo apt-get install -y {})",
+                    pkg, pkg
+                )));
+            }
+        }
+    }
+
+    let version = installed_version(&entry.package).unwrap_or_else(|| "unknown".to_string());
+    pb.finish_with_message(format!(
+        "{} {name}  {version}",
+        output::success_checkmark(colored)
+    ));
+    Ok(LockEntry {
+        name: name.to_string(),
+        version,
+        source: "apt".to_string(),
+        url: None,
+        sha256: None,
+        installed_at: chrono::Utc::now(),
+    })
 }
 
 /// Query the actual installed version via dpkg-query.

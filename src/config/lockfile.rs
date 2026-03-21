@@ -5,11 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use crate::error::GripError;
 
-/// The top-level `grip.lock` document — a list of installed binary records.
+/// The top-level `grip.lock` document — a list of installed binary and library records.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct LockFile {
     #[serde(default, rename = "binary")]
     pub entries: Vec<LockEntry>,
+    #[serde(default, rename = "library")]
+    pub library_entries: Vec<LockEntry>,
 }
 
 /// A single record in the lock file describing an installed binary.
@@ -61,6 +63,20 @@ impl LockFile {
             *existing = entry;
         } else {
             self.entries.push(entry);
+        }
+    }
+
+    /// Look up a library entry by name.
+    pub fn get_library(&self, name: &str) -> Option<&LockEntry> {
+        self.library_entries.iter().find(|e| e.name == name)
+    }
+
+    /// Insert or replace a library lock entry with the same name.
+    pub fn upsert_library(&mut self, entry: LockEntry) {
+        if let Some(existing) = self.library_entries.iter_mut().find(|e| e.name == entry.name) {
+            *existing = entry;
+        } else {
+            self.library_entries.push(entry);
         }
     }
 }

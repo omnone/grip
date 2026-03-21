@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::checksum::sha256_file;
 use crate::config::lockfile::LockFile;
-use crate::config::manifest::{find_manifest_dir, BinaryEntry, Manifest};
+use crate::config::manifest::{find_manifest_dir, BinaryEntry, LibraryEntry, Manifest};
 use crate::error::GripError;
 use crate::platform::Platform;
 
@@ -22,7 +22,7 @@ pub enum CheckStatus {
 /// Summary of a `grip check` run.
 #[derive(Debug, Default)]
 pub struct CheckResult {
-    /// Total entries in `grip.toml` (before platform / tag filters).
+    /// Total entries in `grip.toml` (binaries + libraries, before platform / tag filters).
     pub declared: usize,
     /// Entries that were checked (after platform / tag filters).
     pub examined: usize,
@@ -92,6 +92,50 @@ fn check_one(
     }
 }
 
+fn check_one_library(
+    name: &str,
+    entry: &LibraryEntry,
+    lock: &LockFile,
+) -> CheckStatus {
+    let Some(lock_entry) = lock.get_library(name) else {
+        return CheckStatus::MissingLockEntry;
+    };
+
+    // Verify the package is still actually installed on the system.
+    let is_installed = match entry {
+        LibraryEntry::Apt(a) => std::process::Command::new("dpkg-query")
+            .args(["-W", "-f=${Status}", &a.package])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
+            .unwrap_or(false),
+        LibraryEntry::Dnf(d) => std::process::Command::new("rpm")
+            .args(["-q", &d.package])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+    };
+
+    if !is_installed {
+        return CheckStatus::MissingBinary;
+    }
+
+    // Check version pin if set in manifest.
+    let manifest_ver = match entry {
+        LibraryEntry::Apt(a) => a.version.as_deref(),
+        LibraryEntry::Dnf(d) => d.version.as_deref(),
+    };
+    if let Some(pin) = manifest_ver {
+        if !versions_match(pin, &lock_entry.version) {
+            return CheckStatus::VersionMismatch {
+                expected: pin.to_string(),
+                locked: lock_entry.version.clone(),
+            };
+        }
+    }
+
+    CheckStatus::NoChecksumInLock
+}
+
 /// Verify on-disk binaries against `grip.lock` and optional manifest version pins. Does not install or modify files.
 pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult, GripError> {
     let project_root = match root {
@@ -111,7 +155,7 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
     let platform = Platform::current();
 
     let mut out = CheckResult::default();
-    out.declared = manifest.binaries.len();
+    out.declared = manifest.binaries.len() + manifest.libraries.len();
 
     for (name, entry) in &manifest.binaries {
         let meta = entry.meta();
@@ -167,6 +211,59 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
                 } else {
                     out.warned.push((name.clone(), msg));
                 }
+            }
+        }
+    }
+
+    // ── Library checks ──────────────────────────────────────────────────────
+    for (name, entry) in &manifest.libraries {
+        let meta = entry.meta();
+
+        if !meta.matches_platform(platform.os_str()) {
+            continue;
+        }
+
+        if let Some(t) = tag {
+            if !meta.has_tag(t) {
+                continue;
+            }
+        }
+
+        out.examined += 1;
+        let required = meta.is_required();
+        let status = check_one_library(name, entry, &lock);
+
+        match status {
+            CheckStatus::Ok | CheckStatus::NoChecksumInLock => {
+                out.passed.push(name.clone());
+            }
+            CheckStatus::MissingBinary => {
+                let msg = format!("library `{}` is not installed on this system", name);
+                if required {
+                    out.failed.push((name.clone(), msg));
+                } else {
+                    out.warned.push((name.clone(), msg));
+                }
+            }
+            CheckStatus::MissingLockEntry => {
+                let msg = "no entry in grip.lock (run `grip install`)".to_string();
+                if required {
+                    out.failed.push((name.clone(), msg));
+                } else {
+                    out.warned.push((name.clone(), msg));
+                }
+            }
+            CheckStatus::VersionMismatch { expected, locked } => {
+                let msg = format!("version mismatch: grip.toml wants {expected}, grip.lock has {locked}");
+                if required {
+                    out.failed.push((name.clone(), msg));
+                } else {
+                    out.warned.push((name.clone(), msg));
+                }
+            }
+            CheckStatus::ChecksumMismatch { .. } => {
+                // Libraries have no checksum; this branch is unreachable.
+                out.passed.push(name.clone());
             }
         }
     }

@@ -20,8 +20,8 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use cli::{Cli, Commands};
 use config::manifest::{
-    find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, Manifest,
-    ShellEntry, UrlEntry,
+    find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry,
+    LibDnfEntry, LibraryEntry, Manifest, ShellEntry, UrlEntry,
 };
 use config::lockfile::LockFile;
 use error::GripError;
@@ -57,6 +57,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             url,
             package,
             binary,
+            library,
         } => {
             cmd_add(
                 name,
@@ -66,6 +67,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 url,
                 package,
                 binary,
+                library,
                 root,
                 &cfg,
             )?;
@@ -252,7 +254,7 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
     }
 
     let template = r#"# grip.toml — managed by grip
-# Add your binary dependencies as [binaries.<name>] tables (see README).
+# Add binary dependencies under [binaries.<name>] and system libraries under [libraries.<name>].
 
 [binaries]
 
@@ -262,6 +264,13 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
 # repo = "jqlang/jq"
 # version = "1.7.1"
 # asset_pattern = "jq-linux-amd64"
+
+[libraries]
+
+# Example:
+# [libraries.libssl-dev]
+# source = "apt"
+# package = "libssl-dev"
 "#;
     std::fs::write(path, template)?;
     if !cfg.quiet {
@@ -314,8 +323,7 @@ fn parse_name_at_version(raw: String) -> (String, Option<String>) {
     }
 }
 
-/// Add a new binary entry to `grip.toml`, inferring the source adapter from the platform when
-/// `--source` is not provided.
+/// Add a new binary or library entry to `grip.toml`.
 fn cmd_add(
     name: String,
     source: Option<String>,
@@ -324,6 +332,7 @@ fn cmd_add(
     url: Option<String>,
     package: Option<String>,
     binary: Option<String>,
+    library: bool,
     root: Option<std::path::PathBuf>,
     cfg: &OutputCfg,
 ) -> Result<(), GripError> {
@@ -379,6 +388,32 @@ fn cmd_add(
         }
         (None, None) => None,
     };
+
+    if library {
+        let lib_entry = match source_str {
+            "apt" => LibraryEntry::Apt(LibAptEntry {
+                package: package.unwrap_or_else(|| binary_name.clone()),
+                version,
+                meta: Default::default(),
+            }),
+            "dnf" => LibraryEntry::Dnf(LibDnfEntry {
+                package: package.unwrap_or_else(|| binary_name.clone()),
+                version,
+                meta: Default::default(),
+            }),
+            other => {
+                return Err(GripError::Other(format!(
+                    "source `{other}` is not supported for libraries; use `apt` or `dnf`"
+                )))
+            }
+        };
+        manifest.libraries.insert(binary_name.clone(), lib_entry);
+        manifest.save(&manifest_path)?;
+        if !cfg.quiet {
+            println!("Added '{}' to [libraries] in grip.toml", binary_name);
+        }
+        return Ok(());
+    }
 
     let entry = match source_str {
         "apt" => BinaryEntry::Apt(AptEntry {
@@ -482,9 +517,9 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
     let lock = LockFile::load(&lock_path)?;
     let color = cfg.use_color_stdout();
 
-    if lock.entries.is_empty() {
+    if lock.entries.is_empty() && lock.library_entries.is_empty() {
         if !cfg.quiet {
-            println!("No binaries installed yet.");
+            println!("No binaries or libraries installed yet.");
             println!(
                 "hint: {}",
                 output::dim(color, "Run `grip install` to install everything from grip.toml.")
@@ -494,23 +529,45 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
     }
 
     if !cfg.quiet {
-        println!();
-        let header = output::dim(color, "Installed binaries (from grip.lock)");
-        println!("  {header}");
-        println!();
-        println!(
-            "  {:<18} {:<14} {:<10} {}",
-            "NAME", "VERSION", "SOURCE", "INSTALLED AT"
-        );
-        println!("  {}", "-".repeat(66));
-        for e in &lock.entries {
+        if !lock.entries.is_empty() {
+            println!();
+            let header = output::dim(color, "Installed binaries (from grip.lock)");
+            println!("  {header}");
+            println!();
             println!(
                 "  {:<18} {:<14} {:<10} {}",
-                e.name,
-                e.version,
-                e.source,
-                e.installed_at.format("%Y-%m-%d %H:%M")
+                "NAME", "VERSION", "SOURCE", "INSTALLED AT"
             );
+            println!("  {}", "-".repeat(66));
+            for e in &lock.entries {
+                println!(
+                    "  {:<18} {:<14} {:<10} {}",
+                    e.name,
+                    e.version,
+                    e.source,
+                    e.installed_at.format("%Y-%m-%d %H:%M")
+                );
+            }
+        }
+        if !lock.library_entries.is_empty() {
+            println!();
+            let header = output::dim(color, "Installed libraries (from grip.lock)");
+            println!("  {header}");
+            println!();
+            println!(
+                "  {:<18} {:<14} {:<10} {}",
+                "NAME", "VERSION", "SOURCE", "INSTALLED AT"
+            );
+            println!("  {}", "-".repeat(66));
+            for e in &lock.library_entries {
+                println!(
+                    "  {:<18} {:<14} {:<10} {}",
+                    e.name,
+                    e.version,
+                    e.source,
+                    e.installed_at.format("%Y-%m-%d %H:%M")
+                );
+            }
         }
     }
     Ok(())
