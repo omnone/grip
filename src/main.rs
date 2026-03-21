@@ -10,6 +10,7 @@ mod installer;
 mod output;
 mod cli;
 mod platform;
+mod privilege;
 
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
@@ -131,6 +132,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 std::process::exit(1);
             }
         }
+        Commands::Remove { name, library } => cmd_remove(name, library, root, &cfg)?,
         Commands::Check { tag } => {
             let r = checker::run_check(tag.as_deref(), root)?;
             cmd_check_print(r, &cfg, color_out, color_err)?;
@@ -139,6 +141,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::List => cmd_list(root, &cfg)?,
         Commands::Update { name } => cmd_update(name, root, &cfg).await?,
         Commands::Outdated { tag } => cmd_outdated(tag, root, &cfg).await?,
+        Commands::Doctor => cmd_doctor(root, &cfg)?,
         Commands::Env { shell } => cmd_env(shell, root, &cfg)?,
     }
 
@@ -340,10 +343,19 @@ fn cmd_add(
     let version = version.or(ver_from_at);
 
     let (binary_name, github_shorthand_repo) = if stem.contains('/') {
-        if let Some(src) = source.as_deref() {
-            if src != "github" {
+        // owner/repo shorthand always implies GitHub — require the user to be explicit.
+        match source.as_deref() {
+            Some("github") => {}
+            Some(other) => {
                 return Err(GripError::Other(format!(
-                    "NAME '{stem}' looks like owner/repo; use `--source github` or omit `--source`, or use a simple binary name."
+                    "NAME '{stem}' looks like owner/repo but --source is '{other}'; \
+                     use a simple binary name for non-GitHub sources"
+                )));
+            }
+            None => {
+                return Err(GripError::Other(format!(
+                    "NAME '{stem}' looks like owner/repo; pass --source github explicitly \
+                     (e.g. `grip add {stem} --source github`)"
                 )));
             }
         }
@@ -374,8 +386,13 @@ fn cmd_add(
         Manifest::empty()
     };
 
-    let default_source = detect_default_source();
-    let source_str = source.as_deref().unwrap_or(&default_source);
+    let default_source;
+    let source_str = if let Some(s) = source.as_deref() {
+        s
+    } else {
+        default_source = detect_default_source()?;
+        &default_source
+    };
 
     let repo_resolved: Option<String> = match (&github_shorthand_repo, &repo) {
         (Some(g), None) => Some(g.clone()),
@@ -459,6 +476,67 @@ fn cmd_add(
     Ok(())
 }
 
+/// Remove a binary or library entry from `grip.toml`, `grip.lock`, and `.bin/`.
+fn cmd_remove(
+    name: String,
+    library: bool,
+    root: Option<std::path::PathBuf>,
+    cfg: &OutputCfg,
+) -> Result<(), GripError> {
+    let project_root = match root {
+        Some(r) => r,
+        None => {
+            let cwd = std::env::current_dir()?;
+            find_manifest_dir(&cwd).ok_or(GripError::ManifestNotFound)?
+        }
+    };
+    let manifest_path = project_root.join("grip.toml");
+    let lock_path = project_root.join("grip.lock");
+    let bin_dir = project_root.join(".bin");
+    let color = cfg.use_color_stdout();
+
+    let mut manifest = Manifest::load(&manifest_path)?;
+    let mut lock = LockFile::load(&lock_path)?;
+
+    if library {
+        if !manifest.libraries.contains_key(&name) {
+            return Err(GripError::Other(format!(
+                "'{name}' not found in [libraries] in grip.toml"
+            )));
+        }
+        manifest.libraries.shift_remove(&name);
+        lock.remove_library(&name);
+    } else {
+        if !manifest.binaries.contains_key(&name) {
+            return Err(GripError::Other(format!(
+                "'{name}' not found in [binaries] in grip.toml"
+            )));
+        }
+        manifest.binaries.shift_remove(&name);
+        lock.remove(&name);
+
+        // Remove the symlink / binary from .bin/ if present.
+        let bin_path = bin_dir.join(&name);
+        if bin_path.exists() || bin_path.symlink_metadata().is_ok() {
+            std::fs::remove_file(&bin_path)?;
+            if !cfg.quiet {
+                let check = output::success_checkmark(color);
+                println!("  {check}  removed .bin/{name}");
+            }
+        }
+    }
+
+    manifest.save(&manifest_path)?;
+    lock.save(&lock_path)?;
+
+    if !cfg.quiet {
+        let check = output::success_checkmark(color);
+        let section = if library { "[libraries]" } else { "[binaries]" };
+        println!("  {check}  removed '{name}' from {section} in grip.toml");
+    }
+    Ok(())
+}
+
 /// Run a command with the project's `.bin/` directory prepended to `PATH`.
 fn cmd_run(args: Vec<String>, root: Option<std::path::PathBuf>) -> Result<(), GripError> {
     let project_root = match root {
@@ -481,9 +559,12 @@ fn cmd_run(args: Vec<String>, root: Option<std::path::PathBuf>) -> Result<(), Gr
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Choose a sensible default source adapter for the current platform:
-/// `dnf` or `apt` on Linux (whichever is on PATH), `github` otherwise.
-fn detect_default_source() -> String {
+/// Detect the native package manager for the current platform.
+///
+/// Returns the adapter name (`"dnf"` or `"apt"`) if a supported package manager
+/// is found on PATH. Returns an error if not on Linux or no package manager is
+/// detected — callers should use `--source github` explicitly for non-native sources.
+fn detect_default_source() -> Result<String, GripError> {
     let platform = platform::Platform::current();
     if platform.is_linux() {
         for cmd in &["dnf", "apt-get", "apt"] {
@@ -493,15 +574,19 @@ fn detect_default_source() -> String {
                 .map(|o| o.status.success())
                 .unwrap_or(false)
             {
-                return match *cmd {
+                return Ok(match *cmd {
                     "dnf" => "dnf",
                     _ => "apt",
                 }
-                .to_string();
+                .to_string());
             }
         }
     }
-    "github".to_string()
+    Err(GripError::Other(
+        "no native package manager found; use --source github to add a GitHub binary, \
+         or --source url / --source shell for other sources"
+            .into(),
+    ))
 }
 
 /// Print a formatted table of all entries in `grip.lock`.
@@ -720,6 +805,199 @@ async fn cmd_outdated(
                 );
             }
         }
+
+        // ── Libraries section ───────────────────────────────────────────────
+        let lib_entries: Vec<(&String, &config::manifest::LibraryEntry)> = manifest
+            .libraries
+            .iter()
+            .filter(|(_, e)| e.meta().matches_platform(platform.os_str()))
+            .filter(|(_, e)| tag.as_deref().map(|t| e.meta().has_tag(t)).unwrap_or(true))
+            .collect();
+
+        if !lib_entries.is_empty() {
+            println!();
+            let lib_header = output::dim(color, "Libraries");
+            println!("  {lib_header}");
+            println!();
+            println!(
+                "  {:<name_w$}  {:<col_w$}  {:<col_w$}  STATUS",
+                "LIBRARY", "LOCKED", "SYSTEM",
+            );
+            println!("  {}", output::dim(color, &"─".repeat(name_w + col_w * 2 + 16)));
+
+            for (name, entry) in &lib_entries {
+                let locked_ver = lock
+                    .get_library(name)
+                    .map(|e| e.version.as_str())
+                    .unwrap_or("—");
+
+                let system_ver: Option<String> = match entry {
+                    config::manifest::LibraryEntry::Apt(a) => {
+                        crate::adapters::apt::installed_version(&a.package)
+                    }
+                    config::manifest::LibraryEntry::Dnf(d) => {
+                        crate::adapters::dnf::installed_version(&d.package)
+                    }
+                };
+
+                let (system_display, status) = match &system_ver {
+                    None => ("—".to_string(), output::yellow(color, "not installed")),
+                    Some(v) => {
+                        let norm = |s: &str| s.trim_start_matches('v').to_lowercase();
+                        if norm(locked_ver) == norm(v) {
+                            (v.clone(), output::green(color, "in sync"))
+                        } else {
+                            (v.clone(), output::yellow(color, "drifted"))
+                        }
+                    }
+                };
+
+                println!(
+                    "  {:<name_w$}  {:<col_w$}  {:<col_w$}  {}",
+                    name, locked_ver, system_display, status,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check consistency between `grip.toml`, `grip.lock`, and `.bin/`.
+fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), GripError> {
+    let project_root = match root {
+        Some(r) => r,
+        None => {
+            let cwd = std::env::current_dir()?;
+            find_manifest_dir(&cwd).ok_or(GripError::ManifestNotFound)?
+        }
+    };
+    let manifest_path = project_root.join("grip.toml");
+    let lock_path = project_root.join("grip.lock");
+    let bin_dir = project_root.join(".bin");
+    let color = cfg.use_color_stdout();
+
+    let manifest = Manifest::load(&manifest_path)?;
+    let lock = LockFile::load(&lock_path)?;
+
+    let mut issues: Vec<String> = Vec::new();
+
+    // 1. Orphaned binary lock entries (in lock but not in manifest).
+    for entry in &lock.entries {
+        if !manifest.binaries.contains_key(&entry.name) {
+            issues.push(format!(
+                "binary '{}' is in grip.lock but not in grip.toml (run `grip remove {}`)",
+                entry.name, entry.name
+            ));
+        }
+    }
+
+    // 2. Orphaned library lock entries.
+    for entry in &lock.library_entries {
+        if !manifest.libraries.contains_key(&entry.name) {
+            issues.push(format!(
+                "library '{}' is in grip.lock but not in grip.toml (run `grip remove {} --library`)",
+                entry.name, entry.name
+            ));
+        }
+    }
+
+    // 3. Binaries declared but not installed (not in lock).
+    for name in manifest.binaries.keys() {
+        if lock.get(name).is_none() {
+            issues.push(format!(
+                "binary '{name}' is declared in grip.toml but not installed (run `grip install`)"
+            ));
+        }
+    }
+
+    // 4. Libraries declared but not installed.
+    for name in manifest.libraries.keys() {
+        if lock.get_library(name).is_none() {
+            issues.push(format!(
+                "library '{name}' is declared in grip.toml but not installed (run `grip install`)"
+            ));
+        }
+    }
+
+    // 5. Binary in lock but .bin/ file missing.
+    for entry in &lock.entries {
+        let bin_path = bin_dir.join(&entry.name);
+        if !bin_path.exists() && bin_path.symlink_metadata().is_err() {
+            issues.push(format!(
+                "binary '{}' is in grip.lock but missing from .bin/ (run `grip install`)",
+                entry.name
+            ));
+        }
+    }
+
+    // 6. SHA256 drift — binary on disk doesn't match lock.
+    for entry in &lock.entries {
+        if let Some(expected) = &entry.sha256 {
+            let bin_path = bin_dir.join(&entry.name);
+            if bin_path.exists() {
+                if let Ok(got) = crate::checksum::sha256_file(&bin_path) {
+                    if &got != expected {
+                        issues.push(format!(
+                            "binary '{}' checksum mismatch — binary may have been modified (run `grip install --verify`)",
+                            entry.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. Library in lock but not found on system.
+    for entry in &lock.library_entries {
+        if let Some(lib) = manifest.libraries.get(&entry.name) {
+            let on_system = match lib {
+                LibraryEntry::Apt(a) => std::process::Command::new("dpkg-query")
+                    .args(["-W", "-f=${Status}", &a.package])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
+                    .unwrap_or(false),
+                LibraryEntry::Dnf(d) => std::process::Command::new("rpm")
+                    .args(["-q", &d.package])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false),
+            };
+            if !on_system {
+                issues.push(format!(
+                    "library '{}' is in grip.lock but not found on the system (run `grip install`)",
+                    entry.name
+                ));
+            }
+        }
+    }
+
+    if !cfg.quiet {
+        println!();
+        let header = output::dim(color, "grip doctor");
+        println!("  {header}");
+        println!();
+        if issues.is_empty() {
+            let check = output::success_checkmark(color);
+            println!("  {check}  All checks passed");
+        } else {
+            for issue in &issues {
+                let w = output::warn_glyph(color);
+                println!("  {w}  {issue}");
+            }
+            println!();
+            let summary = output::yellow(color, &format!("{} issue(s) found", issues.len()));
+            println!("  {summary}");
+        }
+        println!();
+    } else {
+        for issue in &issues {
+            eprintln!("warning: {issue}");
+        }
+    }
+
+    if !issues.is_empty() {
+        std::process::exit(1);
     }
 
     Ok(())
@@ -798,18 +1076,6 @@ async fn cmd_update(name: String, root: Option<std::path::PathBuf>, cfg: &Output
     let manifest = Manifest::load(&manifest_path)?;
     let mut lock = LockFile::load(&lock_path)?;
 
-    let entry = manifest
-        .binaries
-        .get(&name)
-        .ok_or_else(|| GripError::Other(format!("'{name}' not found in grip.toml")))?
-        .clone();
-
-    let client = reqwest::Client::builder()
-        .user_agent("grip/0.1")
-        .build()
-        .map_err(GripError::Http)?;
-
-    let adapter = crate::adapters::get_adapter(&entry);
     let color_err = cfg.use_color_stderr();
     let pb = if cfg.quiet {
         ProgressBar::hidden()
@@ -825,6 +1091,38 @@ async fn cmd_update(name: String, root: Option<std::path::PathBuf>, cfg: &Output
         pb.enable_steady_tick(Duration::from_millis(80));
         pb
     };
+
+    // Check libraries first, then binaries.
+    if let Some(lib_entry) = manifest.libraries.get(&name).cloned() {
+        let lock_entry = match &lib_entry {
+            LibraryEntry::Apt(a) => {
+                crate::adapters::apt::install_apt_library(&name, a, pb, color_err).await?
+            }
+            LibraryEntry::Dnf(d) => {
+                crate::adapters::dnf::install_dnf_library(&name, d, pb, color_err).await?
+            }
+        };
+        if !cfg.quiet {
+            let check = output::success_checkmark(color_err);
+            println!("\n  {check}  updated library {name} to {}", lock_entry.version);
+        }
+        lock.upsert_library(lock_entry);
+        lock.save(&lock_path)?;
+        return Ok(());
+    }
+
+    let entry = manifest
+        .binaries
+        .get(&name)
+        .ok_or_else(|| GripError::Other(format!("'{name}' not found in grip.toml")))?
+        .clone();
+
+    let client = reqwest::Client::builder()
+        .user_agent("grip/0.1")
+        .build()
+        .map_err(GripError::Http)?;
+
+    let adapter = crate::adapters::get_adapter(&entry);
     let lock_entry = adapter
         .install(&name, &entry, &bin_dir, &client, pb, color_err)
         .await?;

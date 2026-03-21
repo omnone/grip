@@ -13,9 +13,10 @@ use crate::config::manifest::{BinaryEntry, LibAptEntry};
 use crate::error::GripError;
 use crate::output;
 use crate::platform::Platform;
+use crate::privilege::{check_privileges, PrivilegeMode};
 
-/// Installs packages with `apt-get install` (falling back to `sudo apt-get install`) and
-/// symlinks the binary into `.bin/`. Only supported on Linux.
+/// Installs packages with `apt-get install` and symlinks the binary into `.bin/`.
+/// Only supported on Linux. Privilege check is performed upfront — no silent sudo retry.
 pub struct AptAdapter {
     pub platform: Platform,
 }
@@ -65,65 +66,22 @@ impl SourceAdapter for AptAdapter {
 
         let cmd_name = a.binary.as_deref().unwrap_or(name);
 
-        // If already on PATH, skip installation and just symlink
+        // If already on PATH, skip installation and just symlink.
         let which_pre = Command::new("which").arg(cmd_name).output()?;
         if !which_pre.status.success() {
+            let priv_mode = check_privileges()?;
+
             pb.set_message(format!("{name}  updating package index..."));
-            // `-y` + noninteractive frontend avoid blocking prompts; stderr must be visible if
-            // something still asks (e.g. conffile) or errors.
-            let updated = Command::new("apt-get")
-                .env("DEBIAN_FRONTEND", "noninteractive")
-                .args(["-y", "update"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !updated {
-                Command::new("sudo")
-                    .args([
-                        "env",
-                        "DEBIAN_FRONTEND=noninteractive",
-                        "apt-get",
-                        "-y",
-                        "update",
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .ok();
-            }
+            apt_get(priv_mode, &["-y", "update"])?;
 
             pb.set_message(format!("{name}  installing via apt..."));
-            let status = Command::new("apt-get")
-                .env("DEBIAN_FRONTEND", "noninteractive")
-                .args(["install", "-y", &pkg])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status();
-
-            let ok = match status {
-                Ok(s) if s.success() => true,
-                _ => Command::new("sudo")
-                    .args([
-                        "env",
-                        "DEBIAN_FRONTEND=noninteractive",
-                        "apt-get",
-                        "install",
-                        "-y",
-                        &pkg,
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false),
-            };
+            let ok = apt_get(priv_mode, &["install", "-y", &pkg])
+                .map(|s| s.success())
+                .unwrap_or(false);
 
             if !ok {
                 return Err(GripError::CommandFailed(format!(
-                    "apt-get install {} (try running: sudo apt-get install -y {})",
-                    pkg, pkg
+                    "apt-get install {pkg}"
                 )));
             }
         }
@@ -170,7 +128,7 @@ pub async fn install_apt_library(
     };
     let pkg = pkg.trim_end_matches('=').to_string();
 
-    // Check if already installed via dpkg
+    // Check if already installed via dpkg.
     let already_installed = Command::new("dpkg-query")
         .args(["-W", "-f=${Status}", &entry.package])
         .output()
@@ -178,54 +136,20 @@ pub async fn install_apt_library(
         .unwrap_or(false);
 
     if !already_installed {
+        let priv_mode = check_privileges()?;
+
         pb.set_message(format!("{name}  updating package index..."));
-        let updated = Command::new("apt-get")
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .args(["-y", "update"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !updated {
-            Command::new("sudo")
-                .args(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "update"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .ok();
-        }
+        apt_get(priv_mode, &["-y", "update"])?;
 
         pb.set_message(format!("{name}  installing via apt..."));
-        let ok = Command::new("apt-get")
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .args(["install", "-y", &pkg])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
+        let ok = apt_get(priv_mode, &["install", "-y", &pkg])
             .map(|s| s.success())
             .unwrap_or(false);
+
         if !ok {
-            let ok2 = Command::new("sudo")
-                .args([
-                    "env",
-                    "DEBIAN_FRONTEND=noninteractive",
-                    "apt-get",
-                    "install",
-                    "-y",
-                    &pkg,
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok2 {
-                return Err(GripError::CommandFailed(format!(
-                    "apt-get install {} (try running: sudo apt-get install -y {})",
-                    pkg, pkg
-                )));
-            }
+            return Err(GripError::CommandFailed(format!(
+                "apt-get install {pkg}"
+            )));
         }
     }
 
@@ -244,8 +168,31 @@ pub async fn install_apt_library(
     })
 }
 
+/// Run `apt-get` with the given args, using sudo if required by `priv_mode`.
+/// Returns the exit status of the command.
+fn apt_get(
+    priv_mode: PrivilegeMode,
+    args: &[&str],
+) -> Result<std::process::ExitStatus, GripError> {
+    let status = match priv_mode {
+        PrivilegeMode::Root => Command::new("apt-get")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()?,
+        PrivilegeMode::Sudo => Command::new("sudo")
+            .args(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get"])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()?,
+    };
+    Ok(status)
+}
+
 /// Query the actual installed version via dpkg-query.
-fn installed_version(package: &str) -> Option<String> {
+pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("dpkg-query")
         .args(["-W", "-f=${Version}", package])
         .output()

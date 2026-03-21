@@ -40,6 +40,9 @@ pub enum GripError {
     /// The `source` field in `grip.toml` names an unknown adapter.
     #[error("Unknown source adapter: {0}")]
     UnknownAdapter(String),
+    /// The current user lacks the privileges needed to run the package manager.
+    #[error("insufficient privileges: {hint}")]
+    InsufficientPrivileges { hint: String },
     /// A catch-all for errors that don't fit the variants above.
     #[error("{0}")]
     Other(String),
@@ -76,6 +79,9 @@ impl GripError {
                 "This adapter does not support the current OS; use a different source or add a platform-specific entry.",
             ),
             GripError::GitHubApi(_) => Some("Check the repository name, release tags, and your network access."),
+            GripError::InsufficientPrivileges { .. } => Some(
+                "Run grip as root, or configure passwordless sudo for apt-get/dnf.",
+            ),
             GripError::CommandFailed(_) => Some("Inspect the command output above; fix install_cmd or package name."),
             GripError::Io(_) => Some("Check file permissions and paths (use -v for more detail)."),
             GripError::Http(_) => Some("Check your network and proxy settings (use -v for more detail)."),

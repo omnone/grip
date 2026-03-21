@@ -66,6 +66,16 @@ impl LockFile {
         }
     }
 
+    /// Remove a binary lock entry by name. No-op if not present.
+    pub fn remove(&mut self, name: &str) {
+        self.entries.retain(|e| e.name != name);
+    }
+
+    /// Remove a library lock entry by name. No-op if not present.
+    pub fn remove_library(&mut self, name: &str) {
+        self.library_entries.retain(|e| e.name != name);
+    }
+
     /// Look up a library entry by name.
     pub fn get_library(&self, name: &str) -> Option<&LockEntry> {
         self.library_entries.iter().find(|e| e.name == name)

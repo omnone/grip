@@ -123,7 +123,19 @@ pub async fn run_install(
         to_install.push((name.clone(), entry.clone(), meta.post_install.clone()));
     }
 
-    let total = to_install.len();
+    // Split into system PM installs (apt/dnf — must be sequential to avoid lock contention)
+    // and download-based installs (github/url/shell — safe to run concurrently).
+    let mut pm_installs: Vec<(String, _, Option<String>)> = Vec::new();
+    let mut download_installs: Vec<(String, _, Option<String>)> = Vec::new();
+    for item in to_install {
+        match &item.1 {
+            crate::config::manifest::BinaryEntry::Apt(_)
+            | crate::config::manifest::BinaryEntry::Dnf(_) => pm_installs.push(item),
+            _ => download_installs.push(item),
+        }
+    }
+
+    let total = pm_installs.len() + download_installs.len();
 
     // Set up multi-progress display.
     let mp = MultiProgress::new();
@@ -137,9 +149,9 @@ pub async fn run_install(
     }
 
     let mut pb_map: HashMap<String, ProgressBar> = HashMap::new();
-    let mut futures: FuturesUnordered<_> = FuturesUnordered::new();
 
-    for (idx, (name, entry, post_install)) in to_install.into_iter().enumerate() {
+    // ── Sequential pass: system package manager binaries ───────────────────
+    for (idx, (name, entry, post_install)) in pm_installs.into_iter().enumerate() {
         let pb = if ui.quiet {
             ProgressBar::hidden()
         } else {
@@ -149,6 +161,57 @@ pub async fn run_install(
             pb.set_style(spinner_style.clone());
         }
         pb.set_prefix(format!("[{}/{}]", idx + 1, total));
+        pb.set_message(format!("{name}  resolving..."));
+        pb.enable_steady_tick(Duration::from_millis(80));
+        pb_map.insert(name.clone(), pb.clone());
+
+        let entry = if locked {
+            if let Some(lock_entry) = lock.get(&name) {
+                entry.pin_version(lock_entry.version.as_str())
+            } else {
+                entry
+            }
+        } else {
+            entry
+        };
+
+        let adapter = get_adapter(&entry);
+        let res = if !adapter.is_supported() {
+            pb.finish_with_message(format!(
+                "{} {name}  skipped — unsupported platform",
+                output::dim(ui.colored, "-")
+            ));
+            Err(GripError::UnsupportedPlatform { adapter: adapter.name().to_string() })
+        } else {
+            adapter.install(&name, &entry, &bin_dir, &client, pb, ui.colored).await
+        };
+
+        handle_install_result(
+            name,
+            post_install,
+            res,
+            &required_flags,
+            &mut lock,
+            &mut outcome,
+            &mp,
+            ui,
+        );
+    }
+
+    // ── Concurrent pass: download-based binaries ────────────────────────────
+    let pm_count = pb_map.len(); // offset for display index
+    let mut futures: FuturesUnordered<_> = FuturesUnordered::new();
+
+    for (idx, (name, entry, post_install)) in download_installs.into_iter().enumerate() {
+        let pb = if ui.quiet {
+            ProgressBar::hidden()
+        } else {
+            mp.add(ProgressBar::new_spinner())
+        };
+        if !ui.quiet {
+            pb.set_style(spinner_style.clone());
+        }
+        pb.set_prefix(format!("[{}/{}]", pm_count + idx + 1, total));
         pb.set_message(format!("{name}  resolving..."));
         pb.enable_steady_tick(Duration::from_millis(80));
 
@@ -191,56 +254,16 @@ pub async fn run_install(
     }
 
     while let Some((name, post_install, res)) = futures.next().await {
-        match res {
-            Ok(lock_entry) => {
-                if let Some(cmd) = post_install {
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .status();
-                    match status {
-                        Ok(s) if !s.success() => {
-                            if ui.quiet {
-                                eprintln!("warning: post_install failed for {name}: {cmd}");
-                            } else {
-                                let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
-                                    .ok();
-                            }
-                        }
-                        Err(e) => {
-                            if ui.quiet {
-                                eprintln!("warning: post_install error for {name}: {e}");
-                            } else {
-                                let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install error for {name}: {e}"))
-                                    .ok();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                outcome.installed.push(name);
-                lock.upsert(lock_entry);
-            }
-            Err(GripError::UnsupportedPlatform { .. }) => {
-                outcome.skipped.push(name);
-            }
-            Err(e) => {
-                if let Some(pb) = pb_map.get(&name) {
-                    if !pb.is_finished() {
-                        let x = output::fail_glyph(ui.colored);
-                        pb.finish_with_message(format!("{x} {name}  failed"));
-                    }
-                }
-                let required = required_flags.get(&name).copied().unwrap_or(true);
-                if required {
-                    outcome.failed.push((name, e.to_string()));
-                } else {
-                    outcome.warned.push((name, e.to_string()));
-                }
-            }
-        }
+        handle_install_result(
+            name,
+            post_install,
+            res,
+            &required_flags,
+            &mut lock,
+            &mut outcome,
+            &mp,
+            ui,
+        );
     }
 
     // ── Library install pass ────────────────────────────────────────────────
@@ -360,6 +383,58 @@ pub async fn run_install(
     }
 
     Ok(outcome)
+}
+
+/// Process the result of a single binary install and update `outcome` and `lock` accordingly.
+fn handle_install_result(
+    name: String,
+    post_install: Option<String>,
+    res: Result<crate::config::lockfile::LockEntry, GripError>,
+    required_flags: &HashMap<String, bool>,
+    lock: &mut crate::config::lockfile::LockFile,
+    outcome: &mut InstallResult,
+    mp: &indicatif::MultiProgress,
+    ui: InstallOptions,
+) {
+    match res {
+        Ok(lock_entry) => {
+            if let Some(cmd) = post_install {
+                let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+                match status {
+                    Ok(s) if !s.success() => {
+                        if ui.quiet {
+                            eprintln!("warning: post_install failed for {name}: {cmd}");
+                        } else {
+                            let g = output::warn_glyph(ui.colored);
+                            mp.println(format!("  {g}  post_install failed for {name}: {cmd}")).ok();
+                        }
+                    }
+                    Err(e) => {
+                        if ui.quiet {
+                            eprintln!("warning: post_install error for {name}: {e}");
+                        } else {
+                            let g = output::warn_glyph(ui.colored);
+                            mp.println(format!("  {g}  post_install error for {name}: {e}")).ok();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            outcome.installed.push(name);
+            lock.upsert(lock_entry);
+        }
+        Err(GripError::UnsupportedPlatform { .. }) => {
+            outcome.skipped.push(name);
+        }
+        Err(e) => {
+            let required = required_flags.get(&name).copied().unwrap_or(true);
+            if required {
+                outcome.failed.push((name, e.to_string()));
+            } else {
+                outcome.warned.push((name, e.to_string()));
+            }
+        }
+    }
 }
 
 fn which_exists(cmd: &str) -> bool {

@@ -105,6 +105,14 @@ pub enum Commands {
     },
     /// List installed binaries from grip.lock
     List,
+    /// Remove a binary or library entry from grip.toml, grip.lock, and .bin/
+    Remove {
+        /// Name of the entry to remove (must match the key in grip.toml)
+        name: String,
+        /// Remove from [libraries] instead of [binaries]
+        #[arg(long)]
+        library: bool,
+    },
     /// Re-install one binary from the manifest and refresh its lock entry
     Update {
         name: String,
@@ -115,6 +123,8 @@ pub enum Commands {
         #[arg(long)]
         tag: Option<String>,
     },
+    /// Check consistency of grip.toml, grip.lock, and .bin/
+    Doctor,
     /// Print shell code to add .bin/ to PATH (for use with eval)
     ///
     /// Bash / zsh — add to ~/.bashrc or ~/.zshrc:

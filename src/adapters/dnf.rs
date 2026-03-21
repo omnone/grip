@@ -13,9 +13,11 @@ use crate::config::manifest::{BinaryEntry, LibDnfEntry};
 use crate::error::GripError;
 use crate::output;
 use crate::platform::Platform;
+use crate::privilege::{check_privileges, PrivilegeMode};
 
-/// Installs packages with `dnf install` (falling back to `sudo dnf install`) and symlinks the
-/// binary into `.bin/`. Only supported on Linux where `dnf` is on PATH.
+/// Installs packages with `dnf install` and symlinks the binary into `.bin/`.
+/// Only supported on Linux where `dnf` is on PATH. Privilege check is performed
+/// upfront — no silent sudo retry.
 pub struct DnfAdapter {
     pub platform: Platform,
 }
@@ -56,7 +58,6 @@ impl SourceAdapter for DnfAdapter {
             return Err(GripError::Other("expected dnf entry".into()));
         };
 
-        // Use version-pinned package spec when a version is set (e.g. from --locked).
         let pkg = if let Some(v) = &d.version {
             format!("{}-{}", d.package, v)
         } else {
@@ -66,55 +67,24 @@ impl SourceAdapter for DnfAdapter {
 
         let cmd_name = d.binary.as_deref().unwrap_or(name);
 
-        // If already on PATH, skip installation and just symlink
+        // If already on PATH, skip installation and just symlink.
         let which_pre = Command::new("which").arg(cmd_name).output()?;
         if !which_pre.status.success() {
+            let priv_mode = check_privileges()?;
+
             pb.set_message(format!("{name}  refreshing package metadata..."));
-            // `-y` avoids interactive GPG/repo prompts (e.g. new signing keys); stderr must not be
-            // discarded or those prompts block on stdin with no visible text.
-            let updated = Command::new("dnf")
-                .args(["makecache", "-y"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !updated {
-                Command::new("sudo")
-                    .args(["dnf", "makecache", "-y"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .ok();
-            }
+            dnf(priv_mode, &["makecache", "-y"])?;
 
             pb.set_message(format!("{name}  installing via dnf..."));
-            let status = Command::new("dnf")
-                .args(["install", "-y", &pkg])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status();
-
-            let ok = match status {
-                Ok(s) if s.success() => true,
-                _ => Command::new("sudo")
-                    .args(["dnf", "install", "-y", &pkg])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false),
-            };
+            let ok = dnf(priv_mode, &["install", "-y", &pkg])
+                .map(|s| s.success())
+                .unwrap_or(false);
 
             if !ok {
-                return Err(GripError::CommandFailed(format!(
-                    "dnf install {} (try running: sudo dnf install -y {})",
-                    pkg, pkg
-                )));
+                return Err(GripError::CommandFailed(format!("dnf install {pkg}")));
             }
         }
 
-        // Symlink the installed binary into .bin/ (manifest `name` → actual command `cmd_name`)
         let which = Command::new("which").arg(cmd_name).output()?;
         if !which.status.success() {
             return Err(GripError::CommandFailed(format!(
@@ -157,7 +127,7 @@ pub async fn install_dnf_library(
     };
     let pkg = pkg.trim_end_matches('-').to_string();
 
-    // Check if already installed via rpm
+    // Check if already installed via rpm.
     let already_installed = Command::new("rpm")
         .args(["-q", &entry.package])
         .output()
@@ -165,45 +135,18 @@ pub async fn install_dnf_library(
         .unwrap_or(false);
 
     if !already_installed {
+        let priv_mode = check_privileges()?;
+
         pb.set_message(format!("{name}  refreshing package metadata..."));
-        let updated = Command::new("dnf")
-            .args(["makecache", "-y"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !updated {
-            Command::new("sudo")
-                .args(["dnf", "makecache", "-y"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .ok();
-        }
+        dnf(priv_mode, &["makecache", "-y"])?;
 
         pb.set_message(format!("{name}  installing via dnf..."));
-        let ok = Command::new("dnf")
-            .args(["install", "-y", &pkg])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()
+        let ok = dnf(priv_mode, &["install", "-y", &pkg])
             .map(|s| s.success())
             .unwrap_or(false);
+
         if !ok {
-            let ok2 = Command::new("sudo")
-                .args(["dnf", "install", "-y", &pkg])
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok2 {
-                return Err(GripError::CommandFailed(format!(
-                    "dnf install {} (try running: sudo dnf install -y {})",
-                    pkg, pkg
-                )));
-            }
+            return Err(GripError::CommandFailed(format!("dnf install {pkg}")));
         }
     }
 
@@ -222,13 +165,34 @@ pub async fn install_dnf_library(
     })
 }
 
+/// Run `dnf` with the given args, using sudo if required by `priv_mode`.
+fn dnf(
+    priv_mode: PrivilegeMode,
+    args: &[&str],
+) -> Result<std::process::ExitStatus, GripError> {
+    let status = match priv_mode {
+        PrivilegeMode::Root => Command::new("dnf")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()?,
+        PrivilegeMode::Sudo => Command::new("sudo")
+            .arg("dnf")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()?,
+    };
+    Ok(status)
+}
+
 /// Returns `true` if `cmd` is found on PATH via `which`.
 fn which_exists(cmd: &str) -> bool {
     Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Query the actual installed version via rpm.
-fn installed_version(package: &str) -> Option<String> {
+pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("rpm")
         .args(["-q", "--queryformat", "%{VERSION}-%{RELEASE}", package])
         .output()
