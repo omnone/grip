@@ -6,8 +6,12 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use semver::{Version, VersionReq};
+
+use std::sync::Arc;
 
 use crate::adapters::SourceAdapter;
+use crate::cache::Cache;
 use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::{BinaryEntry, GithubEntry};
@@ -19,6 +23,7 @@ use crate::platform::Platform;
 /// Supported on all platforms.
 pub struct GithubAdapter {
     pub platform: Platform,
+    pub cache: Option<Arc<Cache>>,
 }
 
 /// Minimal GitHub releases API response.
@@ -51,6 +56,11 @@ impl SourceAdapter for GithubAdapter {
             return Err(GripError::Other("expected github entry".into()));
         };
         if let Some(v) = &g.version {
+            if is_version_range(v) {
+                let req = VersionReq::parse(v)
+                    .map_err(|e| GripError::Other(format!("invalid semver range '{v}': {e}")))?;
+                return resolve_range(&g.repo, &req, client).await;
+            }
             return Ok(v.clone());
         }
         let url = format!("https://api.github.com/repos/{}/releases/latest", g.repo);
@@ -126,19 +136,29 @@ impl SourceAdapter for GithubAdapter {
         let asset_size = asset.size;
         let asset_name = asset.name.clone();
 
-        // Download
+        // Download (or use cached archive)
         let tmp = tempfile::NamedTempFile::new()?;
-        pb.set_message(format!("{name}  fetching {asset_name}"));
-        let sha256 = download_with_progress(
-            client,
-            &download_url,
-            tmp.path(),
-            name,
-            asset_size,
-            &pb,
-            colored,
-        )
-        .await?;
+        let sha256 = if let Some(cache) = &self.cache {
+            if let Some(cached) = cache.lookup(&download_url) {
+                pb.set_message(format!("{name}  {asset_name} (cached)"));
+                std::fs::copy(&cached, tmp.path())?;
+                crate::checksum::sha256_file(tmp.path()).map_err(GripError::Io)?
+            } else {
+                pb.set_message(format!("{name}  fetching {asset_name}"));
+                let sha = download_with_progress(
+                    client, &download_url, tmp.path(), name, asset_size, &pb, colored,
+                )
+                .await?;
+                cache.store(&download_url, tmp.path()).ok();
+                sha
+            }
+        } else {
+            pb.set_message(format!("{name}  fetching {asset_name}"));
+            download_with_progress(
+                client, &download_url, tmp.path(), name, asset_size, &pb, colored,
+            )
+            .await?
+        };
 
         // Extract or copy
         pb.set_message(format!("{name}  extracting..."));
@@ -157,6 +177,46 @@ impl SourceAdapter for GithubAdapter {
             installed_at: chrono::Utc::now(),
         })
     }
+}
+
+/// Returns `true` if `v` looks like a semver range rather than a pinned version.
+fn is_version_range(v: &str) -> bool {
+    let t = v.trim();
+    t.starts_with(['^', '~', '>', '<', '=', '*'])
+        || t.contains(".*")
+        || t.contains(" ")
+}
+
+/// Fetch up to 100 releases from GitHub and return the highest version matching `req`.
+async fn resolve_range(
+    repo: &str,
+    req: &VersionReq,
+    client: &Client,
+) -> Result<String, GripError> {
+    #[derive(Deserialize)]
+    struct ReleaseTag { tag_name: String }
+
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
+    let releases: Vec<ReleaseTag> = client
+        .get(&url)
+        .header("User-Agent", "grip/0.1")
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| GripError::GitHubApi(e.to_string()))?
+        .json()
+        .await?;
+
+    releases
+        .iter()
+        .filter_map(|r| {
+            let stripped = r.tag_name.trim_start_matches('v');
+            Version::parse(stripped).ok().map(|v| (v, stripped.to_string()))
+        })
+        .filter(|(v, _)| req.matches(v))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, s)| s)
+        .ok_or_else(|| GripError::GitHubApi(format!("No release matching '{req}' found in {repo}")))
 }
 
 /// Find the best matching asset for the given `pattern` and `platform`.

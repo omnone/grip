@@ -5,9 +5,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::adapters::SourceAdapter;
 use crate::bin_dir::copy_binary;
+use crate::cache::Cache;
 use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::BinaryEntry;
@@ -16,7 +18,9 @@ use crate::output;
 
 /// Downloads a binary (or archive) from a URL, optionally verifies its SHA-256, and installs it.
 /// Supported on all platforms.
-pub struct UrlAdapter;
+pub struct UrlAdapter {
+    pub cache: Option<Arc<Cache>>,
+}
 
 #[async_trait]
 impl SourceAdapter for UrlAdapter {
@@ -48,39 +52,22 @@ impl SourceAdapter for UrlAdapter {
             return Err(GripError::Other("expected url entry".into()));
         };
 
-        pb.set_message(format!("{name}  connecting..."));
-        let resp = client.get(&u.url).send().await?.error_for_status()?;
-        let total = resp.content_length().unwrap_or(0);
-
-        if total > 0 {
-            pb.set_length(total);
-            let tpl = if colored {
-                "  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
-            } else {
-                "  {prefix} {msg} [{bar:40}] {bytes}/{total_bytes} ({eta})"
-            };
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(tpl)
-                    .unwrap()
-                    .progress_chars("█▓░"),
-            );
-        }
-        pb.set_message(format!("{name}  downloading"));
-
         let tmp = tempfile::NamedTempFile::new()?;
-        let file = std::fs::File::create(tmp.path())?;
-        let mut writer = ChecksumWriter::new(std::io::BufWriter::new(file));
 
-        // Drop first resp (it was just for content-length), make a fresh request
-        drop(resp);
-        let mut resp2 = client.get(&u.url).send().await?.error_for_status()?;
-        while let Some(chunk) = resp2.chunk().await? {
-            writer.write_all(&chunk)?;
-            pb.inc(chunk.len() as u64);
-        }
-
-        let (_, sha256) = writer.finalize();
+        // Check cache before downloading
+        let sha256 = if let Some(cache) = &self.cache {
+            if let Some(cached) = cache.lookup(&u.url) {
+                pb.set_message(format!("{name}  (cached)"));
+                std::fs::copy(&cached, tmp.path())?;
+                crate::checksum::sha256_file(tmp.path()).map_err(GripError::Io)?
+            } else {
+                let sha = download_url_to_file(client, &u.url, name, tmp.path(), &pb, colored).await?;
+                cache.store(&u.url, tmp.path()).ok();
+                sha
+            }
+        } else {
+            download_url_to_file(client, &u.url, name, tmp.path(), &pb, colored).await?
+        };
 
         // Verify expected checksum if provided
         if let Some(expected) = &u.sha256 {
@@ -125,6 +112,46 @@ impl SourceAdapter for UrlAdapter {
             installed_at: chrono::Utc::now(),
         })
     }
+}
+
+async fn download_url_to_file(
+    client: &Client,
+    url: &str,
+    label: &str,
+    dest: &Path,
+    pb: &ProgressBar,
+    colored: bool,
+) -> Result<String, GripError> {
+    pb.set_message(format!("{label}  connecting..."));
+    let resp = client.get(url).send().await?.error_for_status()?;
+    let total = resp.content_length().unwrap_or(0);
+    drop(resp);
+
+    if total > 0 {
+        pb.set_length(total);
+        let tpl = if colored {
+            "  {prefix:.bold.dim} {msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+        } else {
+            "  {prefix} {msg} [{bar:40}] {bytes}/{total_bytes} ({eta})"
+        };
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(tpl)
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+    }
+    pb.set_message(format!("{label}  downloading"));
+
+    let file = std::fs::File::create(dest)?;
+    let mut writer = ChecksumWriter::new(std::io::BufWriter::new(file));
+    let mut resp2 = client.get(url).send().await?.error_for_status()?;
+    while let Some(chunk) = resp2.chunk().await? {
+        writer.write_all(&chunk)?;
+        pb.inc(chunk.len() as u64);
+    }
+    let (_, sha256) = writer.finalize();
+    Ok(sha256)
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), GripError> {

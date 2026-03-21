@@ -2,6 +2,7 @@
 
 mod adapters;
 mod bin_dir;
+mod cache;
 mod checker;
 mod checksum;
 mod config;
@@ -19,7 +20,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use cli::{Cli, Commands};
+use cli::{CacheAction, Cli, Commands};
 use config::manifest::{
     find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry,
     LibDnfEntry, LibraryEntry, Manifest, ShellEntry, UrlEntry,
@@ -143,6 +144,8 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::Outdated { tag } => cmd_outdated(tag, root, &cfg).await?,
         Commands::Doctor => cmd_doctor(root, &cfg)?,
         Commands::Env { shell } => cmd_env(shell, root, &cfg)?,
+        Commands::Cache { action } => cmd_cache(action, &cfg)?,
+        Commands::Export { format } => cmd_export(&format, root, &cfg)?,
     }
 
     Ok(())
@@ -717,7 +720,7 @@ async fn cmd_outdated(
             let entry = entry.clone();
             let client = client.clone();
             async move {
-                let adapter = crate::adapters::get_adapter(&entry);
+                let adapter = crate::adapters::get_adapter(&entry, None);
                 let result = adapter.resolve_latest(&entry, &client).await;
                 (name, result)
             }
@@ -1122,7 +1125,12 @@ async fn cmd_update(name: String, root: Option<std::path::PathBuf>, cfg: &Output
         .build()
         .map_err(GripError::Http)?;
 
-    let adapter = crate::adapters::get_adapter(&entry);
+    let update_cache = match cache::Cache::open() {
+        None => None,
+        Some(Ok(c)) => Some(std::sync::Arc::new(c)),
+        Some(Err(_)) => None,
+    };
+    let adapter = crate::adapters::get_adapter(&entry, update_cache);
     let lock_entry = adapter
         .install(&name, &entry, &bin_dir, &client, pb, color_err)
         .await?;
@@ -1133,4 +1141,211 @@ async fn cmd_update(name: String, root: Option<std::path::PathBuf>, cfg: &Output
     lock.upsert(lock_entry);
     lock.save(&lock_path)?;
     Ok(())
+}
+
+fn cmd_cache(action: CacheAction, cfg: &OutputCfg) -> Result<(), GripError> {
+    let color = cfg.use_color_stdout();
+    match cache::Cache::open() {
+        None => {
+            if !cfg.quiet {
+                println!("Cache is disabled (GRIP_CACHE_DIR is set to empty string).");
+            }
+            return Ok(());
+        }
+        Some(Err(e)) => return Err(e),
+        Some(Ok(c)) => match action {
+            CacheAction::Clean => {
+                let (count, bytes) = c.clean()?;
+                if cfg.quiet {
+                    println!("{count} {bytes}");
+                } else {
+                    let freed = format_bytes(bytes);
+                    println!(
+                        "  {}  Removed {count} file{} ({freed})",
+                        output::success_checkmark(color),
+                        if count == 1 { "" } else { "s" }
+                    );
+                }
+            }
+            CacheAction::Info => {
+                let (count, bytes) = c.stats();
+                if cfg.quiet {
+                    println!("{count} {bytes}");
+                } else {
+                    let size = format_bytes(bytes);
+                    println!("  Cache entries : {count}");
+                    println!("  Total size    : {size}");
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), GripError> {
+    let project_root = match root {
+        Some(r) => r,
+        None => {
+            let cwd = std::env::current_dir()?;
+            find_manifest_dir(&cwd).ok_or(GripError::ManifestNotFound)?
+        }
+    };
+    let manifest = Manifest::load(&project_root.join("grip.toml"))?;
+    let lock = LockFile::load(&project_root.join("grip.lock"))?;
+
+    // Collect apt/dnf package specs (binaries + libraries combined)
+    let mut apt_pkgs: Vec<String> = Vec::new();
+    let mut dnf_pkgs: Vec<String> = Vec::new();
+    // (name, url) for curl-based installs
+    let mut curl_installs: Vec<(String, String)> = Vec::new();
+    let mut shell_entries: Vec<(String, String)> = Vec::new();
+
+    for (name, entry) in &manifest.binaries {
+        match entry {
+            BinaryEntry::Apt(a) => {
+                let ver = lock.get(name)
+                    .map(|le| le.version.clone())
+                    .or_else(|| a.version.clone());
+                let spec = match ver {
+                    Some(v) if !v.is_empty() => format!("{}={}", a.package, v),
+                    _ => a.package.clone(),
+                };
+                apt_pkgs.push(spec);
+            }
+            BinaryEntry::Dnf(d) => {
+                let ver = lock.get(name)
+                    .map(|le| le.version.clone())
+                    .or_else(|| d.version.clone());
+                let spec = match ver {
+                    Some(v) if !v.is_empty() => format!("{}-{}", d.package, v),
+                    _ => d.package.clone(),
+                };
+                dnf_pkgs.push(spec);
+            }
+            BinaryEntry::Github(g) => {
+                let url = lock.get(name)
+                    .and_then(|le| le.url.clone())
+                    .unwrap_or_else(|| {
+                        let ver = g.version.as_deref().unwrap_or("latest");
+                        format!("https://github.com/{}/releases/download/v{}/{}", g.repo, ver, name)
+                    });
+                curl_installs.push((name.clone(), url));
+            }
+            BinaryEntry::Url(u) => {
+                curl_installs.push((name.clone(), u.url.clone()));
+            }
+            BinaryEntry::Shell(s) => {
+                shell_entries.push((name.clone(), s.install_cmd.clone()));
+            }
+        }
+    }
+
+    for (name, entry) in &manifest.libraries {
+        match entry {
+            LibraryEntry::Apt(a) => {
+                let ver = lock.get_library(name)
+                    .map(|le| le.version.clone())
+                    .or_else(|| a.version.clone());
+                let spec = match ver {
+                    Some(v) if !v.is_empty() => format!("{}={}", a.package, v),
+                    _ => a.package.clone(),
+                };
+                apt_pkgs.push(spec);
+            }
+            LibraryEntry::Dnf(d) => {
+                let ver = lock.get_library(name)
+                    .map(|le| le.version.clone())
+                    .or_else(|| d.version.clone());
+                let spec = match ver {
+                    Some(v) if !v.is_empty() => format!("{}-{}", d.package, v),
+                    _ => d.package.clone(),
+                };
+                dnf_pkgs.push(spec);
+            }
+        }
+    }
+
+    match format {
+        "dockerfile" => {
+            println!("# Generated by grip export --format dockerfile");
+            if !apt_pkgs.is_empty() {
+                let pkgs = apt_pkgs.join(" \\\n    ");
+                println!("RUN apt-get update -y && apt-get install -y --no-install-recommends \\");
+                println!("    {pkgs} \\");
+                println!("    && rm -rf /var/lib/apt/lists/*");
+            }
+            if !dnf_pkgs.is_empty() {
+                let pkgs = dnf_pkgs.join(" \\\n    ");
+                println!("RUN dnf install -y \\");
+                println!("    {pkgs} \\");
+                println!("    && dnf clean all");
+            }
+            for (name, url) in &curl_installs {
+                println!("RUN curl -fsSL -o /usr/local/bin/{name} \\\n    \"{url}\" \\");
+                println!("    && chmod +x /usr/local/bin/{name}");
+            }
+            for (name, cmd) in &shell_entries {
+                println!("# shell entry '{name}': {cmd}");
+            }
+        }
+        "makefile" => {
+            println!("# Generated by grip export --format makefile");
+            println!(".PHONY: install-deps");
+            println!("install-deps:");
+            if !apt_pkgs.is_empty() {
+                println!("\tapt-get update -y");
+                let pkgs = apt_pkgs.join(" \\\n\t\t");
+                println!("\tapt-get install -y --no-install-recommends \\\n\t\t{pkgs}");
+            }
+            if !dnf_pkgs.is_empty() {
+                let pkgs = dnf_pkgs.join(" \\\n\t\t");
+                println!("\tdnf install -y \\\n\t\t{pkgs}");
+                println!("\tdnf clean all");
+            }
+            for (name, url) in &curl_installs {
+                println!("\tcurl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
+            }
+            for (name, cmd) in &shell_entries {
+                println!("\t# shell entry '{name}': {cmd}");
+            }
+        }
+        _ => {
+            // default: shell
+            println!("#!/bin/sh");
+            println!("# Generated by grip export --format shell");
+            println!("set -eu");
+            if !apt_pkgs.is_empty() {
+                let pkgs = apt_pkgs.join(" \\\n  ");
+                println!("apt-get update -y");
+                println!("apt-get install -y --no-install-recommends \\");
+                println!("  {pkgs}");
+            }
+            if !dnf_pkgs.is_empty() {
+                let pkgs = dnf_pkgs.join(" \\\n  ");
+                println!("dnf install -y \\");
+                println!("  {pkgs}");
+            }
+            for (name, url) in &curl_installs {
+                println!("curl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
+            }
+            for (name, cmd) in &shell_entries {
+                println!("# shell entry '{name}': {cmd}");
+            }
+        }
+    }
+
+    let _ = cfg;
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }

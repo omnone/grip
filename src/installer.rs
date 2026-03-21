@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use crate::adapters::{apt as apt_adapter, dnf as dnf_adapter, get_adapter};
 use crate::bin_dir::ensure_bin_dir;
 use crate::checksum::sha256_file;
@@ -64,6 +66,12 @@ pub async fn run_install(
     let manifest = Manifest::load(&manifest_path)?;
     let mut lock = LockFile::load(&lock_path)?;
     let platform = Platform::current();
+
+    let cache: Option<Arc<crate::cache::Cache>> = match crate::cache::Cache::open() {
+        None => None,
+        Some(Ok(c)) => Some(Arc::new(c)),
+        Some(Err(_)) => None,
+    };
 
     let client = Client::builder()
         .user_agent("grip/0.1")
@@ -175,7 +183,7 @@ pub async fn run_install(
             entry
         };
 
-        let adapter = get_adapter(&entry);
+        let adapter = get_adapter(&entry, cache.clone());
         let res = if !adapter.is_supported() {
             pb.finish_with_message(format!(
                 "{} {name}  skipped — unsupported platform",
@@ -230,9 +238,10 @@ pub async fn run_install(
         let bin_dir = bin_dir.clone();
         let client = client.clone();
         let colored = ui.colored;
+        let cache = cache.clone();
 
         futures.push(async move {
-            let adapter = get_adapter(&entry);
+            let adapter = get_adapter(&entry, cache);
             if !adapter.is_supported() {
                 pb.finish_with_message(format!(
                     "{} {name}  skipped — unsupported platform",

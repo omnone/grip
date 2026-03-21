@@ -125,6 +125,17 @@ pub enum Commands {
     },
     /// Check consistency of grip.toml, grip.lock, and .bin/
     Doctor,
+    /// Manage the local download cache (~/.cache/grip/downloads/)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+    /// Export install commands for use in Dockerfiles or CI scripts
+    Export {
+        /// Output format: dockerfile | shell | makefile
+        #[arg(long, default_value = "shell")]
+        format: String,
+    },
     /// Print shell code to add .bin/ to PATH (for use with eval)
     ///
     /// Bash / zsh — add to ~/.bashrc or ~/.zshrc:
@@ -137,4 +148,12 @@ pub enum Commands {
         #[arg(long, value_name = "SHELL")]
         shell: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CacheAction {
+    /// Remove all cached downloads and print how much was freed
+    Clean,
+    /// Show the number of cached files and total disk usage
+    Info,
 }

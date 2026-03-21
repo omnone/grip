@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use indicatif::ProgressBar;
 use reqwest::Client;
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::cache::Cache;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::BinaryEntry;
 use crate::error::GripError;
@@ -44,13 +46,13 @@ pub trait SourceAdapter: Send + Sync {
 }
 
 /// Construct the appropriate [`SourceAdapter`] for the given manifest entry.
-pub fn get_adapter(entry: &BinaryEntry) -> Box<dyn SourceAdapter> {
+pub fn get_adapter(entry: &BinaryEntry, cache: Option<Arc<Cache>>) -> Box<dyn SourceAdapter> {
     let platform = Platform::current();
     match entry {
         BinaryEntry::Apt(_) => Box::new(apt::AptAdapter { platform }),
         BinaryEntry::Dnf(_) => Box::new(dnf::DnfAdapter { platform }),
-        BinaryEntry::Github(_) => Box::new(github::GithubAdapter { platform }),
-        BinaryEntry::Url(_) => Box::new(url::UrlAdapter),
+        BinaryEntry::Github(_) => Box::new(github::GithubAdapter { platform, cache }),
+        BinaryEntry::Url(_) => Box::new(url::UrlAdapter { cache }),
         BinaryEntry::Shell(_) => Box::new(shell::ShellAdapter),
     }
 }

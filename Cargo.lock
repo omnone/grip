@@ -644,6 +644,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "reqwest",
+ "semver",
  "serde",
  "sha2",
  "tar",
