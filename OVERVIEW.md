@@ -187,12 +187,12 @@ User runs: grip sync / grip add / etc.
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
 | `grip init` | Create `grip.toml` template, add `.bin/` to `.gitignore` | — |
-| `grip add <name>` | Add binary/library to manifest and install immediately | `--source`, `--version`, `--repo`, `--url`, `--package`, `--binary`, `--library` |
+| `grip add <name>` | Add binary/library to manifest and install immediately | `--source`, `--version`, `--repo`, `--url`, `--package`, `--binary`, `--library`, `--cmd` |
 | `grip sync` | Install all missing binaries concurrently | `--locked` (CI mode), `--verify`, `--tag` |
 | `grip check` | Verify `.bin/` matches `grip.lock` | `--tag` |
-| `grip list` | Print all lock file entries with metadata | — |
+| `grip list` | Print lock file entries; `--all` also shows uninstalled declarations | `--all` |
 | `grip remove <name>` | Remove from manifest, lock, and `.bin/` | `--library` |
-| `grip update <name>` | Re-install and refresh a single entry | — |
+| `grip update <name \| --all>` | Re-install and refresh one entry or all entries | `--all` |
 | `grip outdated` | Fetch latest versions and show comparison | `--tag` |
 | `grip doctor` | Detect orphaned entries, missing binaries, SHA256 drift | — |
 | `grip cache info` | Show cache stats | — |
@@ -321,6 +321,12 @@ Uses `indexmap::IndexMap` instead of `HashMap` to preserve the user's key orderi
 
 ### Docker Workflow
 `grip export --format dockerfile` generates native `RUN apt-get install` / `RUN curl` commands from the lock file, so Docker images don't need grip installed at build time.
+
+### Shell Adapter SHA-256
+After a shell `install_cmd` succeeds, grip computes the SHA-256 of the binary placed in `.bin/` (if any) and records it in `grip.lock`, enabling `grip check` to verify shell-installed binaries just like download-based ones.
+
+### Real apt/dnf Version Resolution
+`grip outdated` queries `apt-cache policy` (APT) and `dnf info` (DNF) to retrieve the actual repository candidate version rather than reporting a static `"latest"` string. Both fall back gracefully when the package manager is unavailable.
 
 ### Cache Strategy
 Downloads are keyed by SHA-256 of the URL string. Configurable via `$GRIP_CACHE_DIR`; setting it to empty disables caching entirely.

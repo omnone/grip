@@ -35,7 +35,13 @@ impl SourceAdapter for AptAdapter {
         let BinaryEntry::Apt(a) = entry else {
             return Err(GripError::Other("expected apt entry".into()));
         };
-        Ok(a.version.clone().unwrap_or_else(|| "latest".to_string()))
+        if let Some(v) = &a.version {
+            return Ok(v.clone());
+        }
+        if let Some(v) = apt_cache_candidate(&a.package) {
+            return Ok(v);
+        }
+        Ok("latest".to_string())
     }
 
     async fn install(
@@ -252,6 +258,34 @@ fn apt_get(
     Ok(status)
 }
 
+/// Query the candidate (latest available) version for a package via `apt-cache policy`.
+/// Returns `None` if the command fails or the package is not known to APT.
+fn apt_cache_candidate(package: &str) -> Option<String> {
+    let out = Command::new("apt-cache")
+        .args(["policy", package])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_apt_cache_policy_output(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse the text output of `apt-cache policy` and return the `Candidate:` version.
+/// Returns `None` when the field is absent, empty, or `(none)`.
+pub(crate) fn parse_apt_cache_policy_output(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Candidate:") {
+            let v = rest.trim();
+            if !v.is_empty() && v != "(none)" {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Query the actual installed version via dpkg-query.
 pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("dpkg-query")
@@ -262,5 +296,54 @@ pub fn installed_version(package: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_apt_cache_policy_output;
+
+    const TYPICAL_OUTPUT: &str = "\
+ripgrep:
+  Installed: 13.0.0-4build2
+  Candidate: 14.1.0-2
+  Version table:
+     14.1.0-2 500
+        500 http://archive.ubuntu.com/ubuntu jammy/universe amd64 Packages
+ *** 13.0.0-4build2 100
+        100 /var/lib/dpkg/status";
+
+    #[test]
+    fn parses_candidate_from_typical_output() {
+        assert_eq!(
+            parse_apt_cache_policy_output(TYPICAL_OUTPUT),
+            Some("14.1.0-2".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_candidate_is_none_literal() {
+        let output = "somepkg:\n  Installed: (none)\n  Candidate: (none)\n";
+        assert!(parse_apt_cache_policy_output(output).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_candidate_line_is_absent() {
+        let output = "somepkg:\n  Installed: 1.0.0\n";
+        assert!(parse_apt_cache_policy_output(output).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_output() {
+        assert!(parse_apt_cache_policy_output("").is_none());
+    }
+
+    #[test]
+    fn handles_extra_whitespace_around_version() {
+        let output = "pkg:\n  Candidate:   2.0.0  \n";
+        assert_eq!(
+            parse_apt_cache_policy_output(output),
+            Some("2.0.0".to_string())
+        );
     }
 }

@@ -78,6 +78,12 @@ pub enum Commands {
         binary: Option<String>,
         #[arg(long, help = "Add to [libraries] instead of [binaries] (apt/dnf only)")]
         library: bool,
+        #[arg(
+            long,
+            value_name = "CMD",
+            help = "Shell command to run for --source shell (required for that source)"
+        )]
+        cmd: Option<String>,
     },
     /// Download and install any missing binaries from grip.toml into .bin/
     Sync {
@@ -103,7 +109,11 @@ pub enum Commands {
         tag: Option<String>,
     },
     /// List installed binaries from grip.lock
-    List,
+    List {
+        /// Also show entries declared in grip.toml that are not yet installed
+        #[arg(long)]
+        all: bool,
+    },
     /// Remove a binary or library entry from grip.toml, grip.lock, and .bin/
     Remove {
         /// Name of the entry to remove (must match the key in grip.toml)
@@ -112,9 +122,13 @@ pub enum Commands {
         #[arg(long)]
         library: bool,
     },
-    /// Re-install one binary from the manifest and refresh its lock entry
+    /// Re-install one or all binaries from the manifest and refresh their lock entries
     Update {
-        name: String,
+        /// Name of the binary or library to update (omit when using --all)
+        name: Option<String>,
+        /// Update every binary and library declared in grip.toml
+        #[arg(long)]
+        all: bool,
     },
     /// Check whether newer versions of installed binaries are available
     Outdated {

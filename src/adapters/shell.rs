@@ -69,9 +69,109 @@ impl SourceAdapter for ShellAdapter {
             version,
             source: "shell".to_string(),
             url: None,
-            sha256: None,
+            sha256: crate::bin_dir::sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
             auto_binary: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::manifest::{BinaryEntry, CommonMeta, ShellEntry};
+    use indicatif::ProgressBar;
+    use tempfile::TempDir;
+
+    fn shell_entry(cmd: &str, version: Option<&str>) -> BinaryEntry {
+        BinaryEntry::Shell(ShellEntry {
+            install_cmd: cmd.to_string(),
+            version: version.map(String::from),
+            meta: CommonMeta::default(),
+        })
+    }
+
+    // ── resolve_latest ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_latest_returns_pinned_version() {
+        let entry = shell_entry("true", Some("2.5.0"));
+        let client = reqwest::Client::new();
+        let v = ShellAdapter.resolve_latest(&entry, &client).await.unwrap();
+        assert_eq!(v, "2.5.0");
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_returns_custom_when_version_unset() {
+        let entry = shell_entry("true", None);
+        let client = reqwest::Client::new();
+        let v = ShellAdapter.resolve_latest(&entry, &client).await.unwrap();
+        assert_eq!(v, "custom");
+    }
+
+    // ── install: sha256 capture ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn install_records_sha256_when_binary_placed_in_bin_dir() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Write a known byte sequence so we can assert an exact hash.
+        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        let entry = shell_entry(
+            "printf 'hello' > \"$GRIP_BIN_DIR/mytool\" && chmod +x \"$GRIP_BIN_DIR/mytool\"",
+            Some("1.0.0"),
+        );
+
+        let client = reqwest::Client::new();
+        let result = ShellAdapter
+            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.source, "shell");
+        assert_eq!(result.version, "1.0.0");
+        assert!(result.sha256.is_some(), "sha256 must be set when binary exists in .bin/");
+        assert_eq!(
+            result.sha256.as_deref().unwrap(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        );
+    }
+
+    #[tokio::test]
+    async fn install_sha256_is_none_when_script_places_no_binary() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Script succeeds but writes nothing to $GRIP_BIN_DIR.
+        let entry = shell_entry("true", None);
+
+        let client = reqwest::Client::new();
+        let result = ShellAdapter
+            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .await
+            .unwrap();
+
+        assert!(result.sha256.is_none(), "sha256 must be None when no file is placed in .bin/");
+        assert_eq!(result.version, "custom");
+    }
+
+    // ── install: failure handling ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn install_returns_error_on_nonzero_exit() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let entry = shell_entry("exit 1", None);
+        let client = reqwest::Client::new();
+        let result = ShellAdapter
+            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .await;
+
+        assert!(result.is_err(), "install must fail when the script exits non-zero");
     }
 }

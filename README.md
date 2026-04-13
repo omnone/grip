@@ -83,7 +83,7 @@ $ grip check
 - **Byte-for-byte reproducibility** — `grip.lock` records the exact version, download URL, and SHA-256 of every installed binary. `grip sync --locked` fails CI if the lock would change.
 - **No global pollution** — tools land in `.bin/` at the project root; nothing touches `/usr/local/bin` or any system directory.
 - **Fast, cached installs** — a local download cache avoids re-fetching archives on every run. Concurrent installs for download-based sources.
-- **Mixed sources in one file** — GitHub Releases, direct URLs, APT, DNF, and custom shell scripts all declared in a single `grip.toml`.
+- **Mixed sources in one file** — GitHub Releases, direct URLs, APT, DNF, and custom shell scripts all declared in a single `grip.toml`. Shell installs record a SHA-256 checksum of the placed binary so `grip check` can verify them.
 - **Docker-native export** — `grip export --format dockerfile` generates lock-file-accurate `RUN` instructions, so your images don't need grip installed at build time.
 - **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
 
@@ -142,6 +142,11 @@ version = "^1.7"          # semver range; resolved version is pinned in grip.loc
 source  = "apt"           # or "dnf" on RPM-based systems
 package = "ripgrep"
 binary  = "rg"            # on-PATH command differs from the package name
+
+[binaries.mytool]
+source      = "shell"
+install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
+version     = "1.0"       # metadata; SHA-256 of the installed binary is recorded automatically
 
 [libraries.libssl-dev]
 source  = "apt"

@@ -36,7 +36,13 @@ impl SourceAdapter for DnfAdapter {
         let BinaryEntry::Dnf(d) = entry else {
             return Err(GripError::Other("expected dnf entry".into()));
         };
-        Ok(d.version.clone().unwrap_or_else(|| "latest".to_string()))
+        if let Some(v) = &d.version {
+            return Ok(v.clone());
+        }
+        if let Some(v) = dnf_latest_version(&d.package) {
+            return Ok(v);
+        }
+        Ok("latest".to_string())
     }
 
     async fn install(
@@ -254,6 +260,55 @@ fn detect_package_executables(package: &str) -> Vec<String> {
         .collect()
 }
 
+/// Query the latest available version for a package via `dnf info --quiet`.
+/// Parses `Version` and `Release` fields and returns them joined as `version-release`.
+/// Returns `None` if the command fails or the package is not known to DNF.
+fn dnf_latest_version(package: &str) -> Option<String> {
+    let out = Command::new("dnf")
+        .args(["info", "--quiet", package])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_dnf_info_output(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse the text output of `dnf info --quiet` and return `version-release`.
+/// Returns only the `Version` field when `Release` is absent, and `None` when
+/// neither field is present.
+pub(crate) fn parse_dnf_info_output(output: &str) -> Option<String> {
+    let mut version: Option<&str> = None;
+    let mut release: Option<&str> = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("Version") {
+            if let Some(v) = rest
+                .trim_start_matches(|c: char| c == ' ' || c == ':')
+                .split_whitespace()
+                .next()
+            {
+                version = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("Release") {
+            if let Some(r) = rest
+                .trim_start_matches(|c: char| c == ' ' || c == ':')
+                .split_whitespace()
+                .next()
+            {
+                release = Some(r);
+            }
+        }
+        if version.is_some() && release.is_some() {
+            break;
+        }
+    }
+    match (version, release) {
+        (Some(v), Some(r)) => Some(format!("{v}-{r}")),
+        (Some(v), None) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
 /// Query the actual installed version via rpm.
 pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("rpm")
@@ -264,5 +319,67 @@ pub fn installed_version(package: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dnf_info_output;
+
+    const TYPICAL_OUTPUT: &str = "\
+Last metadata expiration check: 0:01:23 ago on Mon Apr 13 10:00:00 2026.
+Available Packages
+Name         : ripgrep
+Version      : 14.1.0
+Release      : 2.fc41
+Architecture : x86_64
+Size         : 1.5 M
+Source       : ripgrep-14.1.0-2.fc41.src.rpm
+Repository   : fedora
+Summary      : Line oriented search tool using Rust's regex library
+URL          : https://github.com/BurntSushi/ripgrep
+License      : Unlicense
+Description  : ripgrep is a line-oriented search tool.";
+
+    #[test]
+    fn parses_version_and_release_from_typical_output() {
+        assert_eq!(
+            parse_dnf_info_output(TYPICAL_OUTPUT),
+            Some("14.1.0-2.fc41".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_version_only_when_release_absent() {
+        let output = "Version      : 3.2.1\n";
+        assert_eq!(
+            parse_dnf_info_output(output),
+            Some("3.2.1".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_neither_field_present() {
+        let output = "Name         : somepkg\nSummary      : A tool\n";
+        assert!(parse_dnf_info_output(output).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_output() {
+        assert!(parse_dnf_info_output("").is_none());
+    }
+
+    #[test]
+    fn stops_at_first_version_and_release_pair() {
+        // Two stanzas — should return the first Version+Release encountered.
+        let output = "\
+Version      : 1.0.0
+Release      : 1.fc40
+Version      : 2.0.0
+Release      : 1.fc40";
+        assert_eq!(
+            parse_dnf_info_output(output),
+            Some("1.0.0-1.fc40".to_string())
+        );
     }
 }

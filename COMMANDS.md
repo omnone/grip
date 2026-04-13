@@ -31,6 +31,7 @@ grip add BurntSushi/ripgrep                         # GitHub Releases shorthand
 grip add jq@1.7.1 --repo jqlang/jq --source github  # pin a version
 grip add libssl-dev --library                        # system library (no executable)
 grip add mytool --source url --url https://example.com/mytool.tar.gz
+grip add mytool --source shell --cmd 'curl -fsSL https://example.com/install.sh | sh -s -- --dir $GRIP_BIN_DIR'
 ```
 
 | Flag | Description |
@@ -42,6 +43,7 @@ grip add mytool --source url --url https://example.com/mytool.tar.gz
 | `--package <pkg>` | Package name for apt/dnf (defaults to binary name) |
 | `--binary <cmd>` | On-PATH command for apt/dnf when it differs from NAME (e.g. `rg` for `ripgrep`) |
 | `--library` | Add to `[libraries]` instead of `[binaries]` (apt/dnf only; no executable required) |
+| `--cmd <CMD>` | Shell command to run for `--source shell` (required for that source; `$GRIP_BIN_DIR` is set) |
 
 ---
 
@@ -83,7 +85,12 @@ Exits `0` if all required entries pass; `1` if any required entry fails.
 
 ### `grip outdated`
 
-Fetches the latest available version for every installed binary and shows a comparison table.
+Fetches the latest available version for every declared binary and shows a comparison table.
+
+- **GitHub** entries: queries the GitHub Releases API.
+- **apt** entries: queries `apt-cache policy` for the repository candidate version.
+- **dnf** entries: queries `dnf info` for the latest available version.
+- **url / shell** entries: compares the lock version against the manifest pin; no network query.
 
 ```sh
 grip outdated
@@ -96,13 +103,21 @@ grip outdated --tag dev
 
 ---
 
-### `grip update <name>`
+### `grip update <name | --all>`
 
-Re-installs a single binary from the manifest, fetching the latest version, and refreshes its lock entry.
+Re-installs one or all binaries and libraries from the manifest, fetching the latest version, and refreshes their lock entries.
 
 ```sh
-grip update ripgrep
+grip update ripgrep          # update a single binary
+grip update libssl-dev       # update a single library
+grip update --all            # update every entry in grip.toml concurrently
 ```
+
+| Flag | Description |
+|---|---|
+| `--all` | Update every binary and library declared in `grip.toml` |
+
+When `--all` is used, download-based entries (GitHub, URL, shell) are updated concurrently; system packages (apt, dnf) are updated sequentially. A summary line is printed after all updates complete.
 
 ---
 
@@ -123,7 +138,16 @@ grip remove libssl-dev --library   # remove a library entry
 
 ### `grip list`
 
-Prints all entries from `grip.lock` with their versions, sources, and install timestamps, in separate sections for binaries and libraries. No flags.
+Prints entries from `grip.lock` with their versions, sources, and install timestamps, in separate sections for binaries and libraries.
+
+```sh
+grip list          # installed entries only (from grip.lock)
+grip list --all    # all declared entries; uninstalled ones are highlighted
+```
+
+| Flag | Description |
+|---|---|
+| `--all` | Also show entries declared in `grip.toml` that have not yet been installed, with a `not installed` status column |
 
 ---
 
@@ -294,7 +318,7 @@ Add with: `grip add libssl-dev --library`
 
 ### Shell
 
-Runs an arbitrary shell command. `$GRIP_BIN_DIR` is set to the project's `.bin/` directory.
+Runs an arbitrary shell command. `$GRIP_BIN_DIR` is set to the project's `.bin/` directory so the command can place the binary there.
 
 ```toml
 [binaries.mytool]
@@ -302,6 +326,16 @@ source      = "shell"
 install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
 version     = "1.0"    # metadata only; not enforced by grip
 ```
+
+Add from the CLI with `--cmd` (required for `--source shell`):
+
+```sh
+grip add mytool --source shell \
+  --cmd 'curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR' \
+  --version 1.0
+```
+
+After installation, grip computes the SHA-256 of the binary placed in `.bin/` (if any) and records it in `grip.lock`. This allows `grip check` to verify the binary has not been tampered with on subsequent runs.
 
 ---
 
@@ -328,6 +362,6 @@ In CI, use `--locked` to enforce the lock file and fail if it would change:
 grip sync --locked
 ```
 
-Use `grip outdated` to see what has newer versions available, then `grip update <name>` to upgrade and refresh the lock entry.
+Use `grip outdated` to see what has newer versions available, then `grip update <name>` to upgrade one entry or `grip update --all` to upgrade everything at once and refresh all lock entries.
 
 Use `grip export --format dockerfile` to generate a Dockerfile snippet from the lock file without requiring grip in the image.
