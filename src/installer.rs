@@ -3,6 +3,7 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Client;
+use std::io::IsTerminal;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,9 +25,16 @@ use crate::platform::Platform;
 pub struct InstallOptions {
     pub quiet: bool,
     pub colored: bool,
+    /// Skip the interactive confirmation prompt for shell installs.
+    /// Has no effect on entries with `allow_shell = false` — those are always blocked.
+    pub yes: bool,
+    /// Fail before installing if any entry has no version pin.
+    /// Prevents silent auto-upgrades in CI.
+    pub require_pins: bool,
 }
 
 /// Summary of a completed install run.
+#[derive(Debug)]
 pub struct InstallResult {
     /// Names of binaries that were newly installed.
     pub installed: Vec<String>,
@@ -69,6 +77,21 @@ pub async fn run_install(
     let manifest = Manifest::load(&manifest_path)?;
     let mut lock = LockFile::load(&lock_path)?;
     let platform = Platform::current();
+
+    // --require-pins: fail before touching the network if any entry floats.
+    if ui.require_pins {
+        let unpinned: Vec<String> = manifest
+            .binaries
+            .iter()
+            .filter(|(_, e)| !e.is_version_pinned())
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !unpinned.is_empty() {
+            return Err(crate::error::GripError::UnpinnedEntries {
+                names: unpinned.join(", "),
+            });
+        }
+    }
 
     let cache: Option<Arc<crate::cache::Cache>> = match crate::cache::Cache::open() {
         None => None,
@@ -144,6 +167,45 @@ pub async fn run_install(
             crate::config::manifest::BinaryEntry::Apt(_)
             | crate::config::manifest::BinaryEntry::Dnf(_) => pm_installs.push(item),
             _ => download_installs.push(item),
+        }
+    }
+
+    // ── Shell install confirmation ──────────────────────────────────────────
+    // When running interactively (TTY stdin) and the user has not passed --yes,
+    // display each pending shell command and ask for explicit per-entry approval.
+    // Entries with `allow_shell = false` are blocked entirely by the adapter;
+    // this prompt is a second layer for entries that already have `allow_shell = true`.
+    if !ui.yes && std::io::stdin().is_terminal() {
+        let mut rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (name, entry, _) in &download_installs {
+            if let crate::config::manifest::BinaryEntry::Shell(s) = entry {
+                if s.allow_shell {
+                    use std::io::Write;
+                    eprintln!(
+                        "\nwarning: '{name}' will run a shell command:\n  {}\n",
+                        s.install_cmd
+                    );
+                    eprint!("  Allow execution? [y/N] ");
+                    std::io::stderr().flush().ok();
+                    let mut input = String::new();
+                    if std::io::stdin().read_line(&mut input).is_ok()
+                        && !input.trim().eq_ignore_ascii_case("y")
+                    {
+                        rejected.insert(name.clone());
+                    }
+                }
+            }
+        }
+        if !rejected.is_empty() {
+            download_installs.retain(|(name, _, _)| !rejected.contains(name));
+            for name in rejected {
+                let required = required_flags.get(&name).copied().unwrap_or(true);
+                if required {
+                    outcome.failed.push((name, "shell install rejected by user".to_string()));
+                } else {
+                    outcome.warned.push((name, "shell install rejected by user".to_string()));
+                }
+            }
         }
     }
 
@@ -475,4 +537,124 @@ fn which_exists(cmd: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|dir| dir.join(cmd).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn opts(require_pins: bool) -> InstallOptions {
+        InstallOptions {
+            quiet: true,
+            colored: false,
+            yes: false,
+            require_pins,
+        }
+    }
+
+    // ── require_pins guard ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn require_pins_passes_when_all_pinned() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq", version = "1.7.1" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        // jq is pinned so the guard passes; the install may succeed or fail for
+        // other reasons (network) but must NOT fail with UnpinnedEntries.
+        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true)).await;
+        if let Err(e) = result {
+            assert!(
+                !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),
+                "expected no UnpinnedEntries error, got: {e:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn require_pins_fails_when_entry_has_no_version() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        let err = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, crate::error::GripError::UnpinnedEntries { .. }),
+            "expected UnpinnedEntries, got: {err:?}"
+        );
+        assert!(err.to_string().contains("jq"));
+    }
+
+    #[tokio::test]
+    async fn require_pins_lists_all_unpinned_names() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq" }
+rg = { source = "github", repo = "BurntSushi/ripgrep" }
+fd = { source = "github", repo = "sharkdp/fd", version = "9.0.0" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        let err = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true))
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        // jq and rg are unpinned; fd is pinned
+        assert!(msg.contains("jq"), "expected jq in: {msg}");
+        assert!(msg.contains("rg"), "expected rg in: {msg}");
+        assert!(!msg.contains("fd"), "fd should not be in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn require_pins_allows_url_entries_without_version() {
+        // URL entries are always considered pinned — the URL is the pin.
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+mytool = { source = "url", url = "https://example.com/mytool-1.0" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        // The guard passes; the install will likely fail for other reasons but
+        // must NOT fail with UnpinnedEntries.
+        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true)).await;
+        if let Err(e) = result {
+            assert!(
+                !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),
+                "URL entries should never be flagged as unpinned, got: {e:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_require_pins_does_not_block_unpinned_entries() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        // Without require_pins the guard is skipped — install may fail for other
+        // reasons (network offline in CI) but not with UnpinnedEntries.
+        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(false)).await;
+        if let Err(e) = result {
+            assert!(
+                !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),
+                "should not get UnpinnedEntries without flag, got: {e:?}"
+            );
+        }
+    }
 }

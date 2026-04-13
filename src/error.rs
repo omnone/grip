@@ -40,6 +40,22 @@ pub enum GripError {
     /// The current user lacks the privileges needed to run the package manager.
     #[error("insufficient privileges: {hint}")]
     InsufficientPrivileges { hint: String },
+    /// Shell install is blocked because `allow_shell` is not explicitly set to `true`.
+    #[error("shell install for '{name}' is blocked: `allow_shell` is not set to true in grip.toml")]
+    ShellNotAllowed { name: String },
+    /// `gpg` binary was not found on PATH when signature verification was requested.
+    #[error("gpg not found on PATH: install gpg to verify release signatures")]
+    GpgNotFound,
+    /// GPG signature verification failed or the fingerprint did not match.
+    #[error("GPG signature verification failed for '{name}': {detail}")]
+    GpgVerificationFailed { name: String, detail: String },
+    /// One or more entries have no version pin and `--require-pins` was set.
+    #[error(
+        "the following entries have no version pin: {names}\n\
+         Run `grip sync` without `--require-pins` to install the latest versions, \
+         then pin them with `grip add <name>@<version>`."
+    )]
+    UnpinnedEntries { names: String },
     /// A catch-all for errors that don't fit the variants above.
     #[error("{0}")]
     Other(String),
@@ -75,6 +91,22 @@ impl GripError {
             GripError::GitHubApi(_) => Some("Check the repository name, release tags, and your network access."),
             GripError::InsufficientPrivileges { .. } => Some(
                 "Run grip as root, or configure passwordless sudo for apt-get/dnf.",
+            ),
+            GripError::ShellNotAllowed { .. } => Some(
+                "Review install_cmd in grip.toml, then add `allow_shell = true` to the entry to permit execution. \
+                 Use `grip add --source shell --allow-shell` to set this flag when adding the entry.",
+            ),
+            GripError::GpgNotFound => Some(
+                "Install gpg (e.g. `apt install gnupg` or `brew install gnupg`) \
+                 or remove gpg_fingerprint from grip.toml to skip signature verification.",
+            ),
+            GripError::GpgVerificationFailed { .. } => Some(
+                "The release asset may have been tampered with, or the key is not in your keyring. \
+                 Import the maintainer's key with `gpg --recv-keys <fingerprint>` and re-run.",
+            ),
+            GripError::UnpinnedEntries { .. } => Some(
+                "Pin each entry by adding a version: `grip add <name>@<version>`, \
+                 or remove `--require-pins` to allow floating versions.",
             ),
             GripError::CommandFailed(_) => Some("Inspect the command output above; fix install_cmd or package name."),
             GripError::Io(_) => Some("Check file permissions and paths (use -v for more detail)."),
@@ -165,6 +197,55 @@ mod tests {
     #[test]
     fn command_failed_has_hint() {
         assert!(GripError::CommandFailed("exit 1".into()).hint().is_some());
+    }
+
+    #[test]
+    fn shell_not_allowed_has_hint() {
+        assert!(GripError::ShellNotAllowed { name: "mytool".into() }.hint().is_some());
+    }
+
+    #[test]
+    fn shell_not_allowed_message_contains_name() {
+        let err = GripError::ShellNotAllowed { name: "mytool".into() };
+        assert!(err.to_string().contains("mytool"));
+    }
+
+    #[test]
+    fn gpg_not_found_has_hint() {
+        assert!(GripError::GpgNotFound.hint().is_some());
+    }
+
+    #[test]
+    fn gpg_verification_failed_has_hint() {
+        assert!(GripError::GpgVerificationFailed {
+            name: "jq".into(),
+            detail: "bad sig".into()
+        }
+        .hint()
+        .is_some());
+    }
+
+    #[test]
+    fn gpg_verification_failed_message_contains_name_and_detail() {
+        let err = GripError::GpgVerificationFailed {
+            name: "jq".into(),
+            detail: "fingerprint mismatch".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("jq"));
+        assert!(msg.contains("fingerprint mismatch"));
+    }
+
+    #[test]
+    fn unpinned_entries_has_hint() {
+        assert!(GripError::UnpinnedEntries { names: "jq, rg".into() }.hint().is_some());
+    }
+
+    #[test]
+    fn unpinned_entries_message_contains_names() {
+        let err = GripError::UnpinnedEntries { names: "jq, rg".into() };
+        assert!(err.to_string().contains("jq"));
+        assert!(err.to_string().contains("rg"));
     }
 
     #[test]

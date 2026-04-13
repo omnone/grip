@@ -327,6 +327,9 @@ mod tests {
             version: version.map(String::from),
             asset_pattern: None,
             binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
             meta: CommonMeta::default(),
         })
     }

@@ -101,6 +101,23 @@ pub struct GithubEntry {
     pub asset_pattern: Option<String>,
     /// Name of the binary inside the archive when it differs from the entry name.
     pub binary: Option<String>,
+    /// GPG key fingerprint (or long key ID) used to verify the release signature.
+    /// When set, grip downloads the detached signature asset and verifies it against
+    /// this fingerprint using the system `gpg` binary. Hard error on mismatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_fingerprint: Option<String>,
+    /// Glob pattern to locate the detached signature asset in the release
+    /// (e.g. `"*.sig"`, `"checksums.txt.asc"`).
+    /// When omitted, grip auto-detects using common patterns (`<asset>.sig`, `<asset>.asc`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sig_asset_pattern: Option<String>,
+    /// Glob pattern to locate a signed checksums file in the release
+    /// (e.g. `"*SHA256SUMS*"`, `"checksums.txt"`). When set, activates signed-checksums
+    /// verification: grip verifies the checksums file's GPG signature, then validates the
+    /// downloaded asset against the hash inside it. Takes precedence over direct binary
+    /// signature verification (`sig_asset_pattern`). Requires `gpg_fingerprint`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksums_asset_pattern: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -113,6 +130,25 @@ pub struct UrlEntry {
     pub binary: Option<String>,
     /// Expected SHA-256 hex digest for download verification.
     pub sha256: Option<String>,
+    /// GPG key fingerprint (or long key ID) used to verify the downloaded file.
+    /// Requires `sig_url` to also be set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_fingerprint: Option<String>,
+    /// URL of the detached GPG signature file (e.g. `https://example.com/tool.tar.gz.sig`).
+    /// Used for direct binary signature verification (Mode 1). Required when `gpg_fingerprint`
+    /// is set without `signed_checksums_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sig_url: Option<String>,
+    /// URL of a signed checksums file (e.g. `https://example.com/SHA256SUMS`). When set,
+    /// activates signed-checksums verification (Mode 2): grip verifies the checksums file's GPG
+    /// signature, then validates the downloaded binary against the hash inside it. Requires
+    /// `gpg_fingerprint` and `checksums_sig_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_checksums_url: Option<String>,
+    /// URL of the GPG signature for the checksums file
+    /// (e.g. `https://example.com/SHA256SUMS.sig`). Required when `signed_checksums_url` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksums_sig_url: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -124,6 +160,12 @@ pub struct ShellEntry {
     /// project's `.bin/` directory so the script can place the binary there.
     pub install_cmd: String,
     pub version: Option<String>,
+    /// Must be explicitly set to `true` before grip will execute the shell command.
+    /// Protects against arbitrary code execution if `grip.toml` is compromised (e.g. via a
+    /// malicious PR). Omitting this field or setting it to `false` blocks execution and
+    /// surfaces a clear error pointing to this field.
+    #[serde(default)]
+    pub allow_shell: bool,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -163,6 +205,35 @@ impl BinaryEntry {
             BinaryEntry::Github(e) => &e.meta,
             BinaryEntry::Url(e) => &e.meta,
             BinaryEntry::Shell(e) => &e.meta,
+        }
+    }
+
+    /// Returns `true` if this entry has an explicit version pin.
+    ///
+    /// A pinned entry always installs the same artifact on every `grip sync`.
+    /// An unpinned entry silently upgrades to whatever is current — a supply-chain
+    /// risk if the upstream release is ever compromised.
+    ///
+    /// `Url` entries are always considered pinned: the URL itself identifies a
+    /// specific artifact. All other sources require an explicit `version` field.
+    pub fn is_version_pinned(&self) -> bool {
+        match self {
+            BinaryEntry::Apt(a) => a.version.is_some(),
+            BinaryEntry::Dnf(d) => d.version.is_some(),
+            BinaryEntry::Github(g) => g.version.is_some(),
+            BinaryEntry::Url(_) => true,
+            BinaryEntry::Shell(s) => s.version.is_some(),
+        }
+    }
+
+    /// Human-readable source label used in diagnostics.
+    pub fn source_label(&self) -> &'static str {
+        match self {
+            BinaryEntry::Apt(_) => "apt",
+            BinaryEntry::Dnf(_) => "dnf",
+            BinaryEntry::Github(_) => "github",
+            BinaryEntry::Url(_) => "url",
+            BinaryEntry::Shell(_) => "shell",
         }
     }
 }
@@ -338,6 +409,9 @@ mod tests {
                 version: Some("14.0.0".to_string()),
                 asset_pattern: None,
                 binary: None,
+                gpg_fingerprint: None,
+                sig_asset_pattern: None,
+                checksums_asset_pattern: None,
                 meta: CommonMeta::default(),
             }),
         );
@@ -371,6 +445,9 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
             meta: CommonMeta::default(),
         });
         let pinned = entry.pin_version("2.40.0");
@@ -418,6 +495,7 @@ mod tests {
         let entry = BinaryEntry::Shell(ShellEntry {
             install_cmd: "echo hi".to_string(),
             version: None,
+            allow_shell: false,
             meta: CommonMeta::default(),
         });
         let pinned = entry.pin_version("0.1.0");
@@ -443,6 +521,9 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
             meta: meta.clone(),
         });
         assert_eq!(entry.meta().required, Some(false));
@@ -456,6 +537,122 @@ mod tests {
         std::fs::write(tmp.path().join("grip.toml"), "").unwrap();
         let result = find_manifest_dir(tmp.path());
         assert_eq!(result, Some(tmp.path().to_path_buf()));
+    }
+
+    // ── BinaryEntry::is_version_pinned ───────────────────────────────────────
+
+    #[test]
+    fn github_entry_pinned_when_version_set() {
+        let entry = BinaryEntry::Github(GithubEntry {
+            repo: "jqlang/jq".to_string(),
+            version: Some("1.7.1".to_string()),
+            asset_pattern: None,
+            binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
+            meta: CommonMeta::default(),
+        });
+        assert!(entry.is_version_pinned());
+    }
+
+    #[test]
+    fn github_entry_unpinned_when_no_version() {
+        let entry = BinaryEntry::Github(GithubEntry {
+            repo: "jqlang/jq".to_string(),
+            version: None,
+            asset_pattern: None,
+            binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
+            meta: CommonMeta::default(),
+        });
+        assert!(!entry.is_version_pinned());
+    }
+
+    #[test]
+    fn apt_entry_pinned_when_version_set() {
+        let entry = BinaryEntry::Apt(AptEntry {
+            package: "jq".to_string(),
+            binary: None,
+            version: Some("1.6".to_string()),
+            meta: CommonMeta::default(),
+        });
+        assert!(entry.is_version_pinned());
+    }
+
+    #[test]
+    fn apt_entry_unpinned_when_no_version() {
+        let entry = BinaryEntry::Apt(AptEntry {
+            package: "jq".to_string(),
+            binary: None,
+            version: None,
+            meta: CommonMeta::default(),
+        });
+        assert!(!entry.is_version_pinned());
+    }
+
+    #[test]
+    fn url_entry_always_pinned() {
+        let entry = BinaryEntry::Url(UrlEntry {
+            url: "https://example.com/tool-1.0.tar.gz".to_string(),
+            binary: None,
+            sha256: None,
+            gpg_fingerprint: None,
+            sig_url: None,
+            signed_checksums_url: None,
+            checksums_sig_url: None,
+            meta: CommonMeta::default(),
+        });
+        assert!(entry.is_version_pinned());
+    }
+
+    #[test]
+    fn shell_entry_pinned_when_version_set() {
+        let entry = BinaryEntry::Shell(ShellEntry {
+            install_cmd: "echo hi".to_string(),
+            version: Some("2.0".to_string()),
+            allow_shell: true,
+            meta: CommonMeta::default(),
+        });
+        assert!(entry.is_version_pinned());
+    }
+
+    #[test]
+    fn shell_entry_unpinned_when_no_version() {
+        let entry = BinaryEntry::Shell(ShellEntry {
+            install_cmd: "curl ... | sh".to_string(),
+            version: None,
+            allow_shell: true,
+            meta: CommonMeta::default(),
+        });
+        assert!(!entry.is_version_pinned());
+    }
+
+    // ── BinaryEntry::source_label ─────────────────────────────────────────────
+
+    #[test]
+    fn source_label_matches_source_type() {
+        let github = BinaryEntry::Github(GithubEntry {
+            repo: "a/b".to_string(),
+            version: None,
+            asset_pattern: None,
+            binary: None,
+            gpg_fingerprint: None,
+            sig_asset_pattern: None,
+            checksums_asset_pattern: None,
+            meta: CommonMeta::default(),
+        });
+        assert_eq!(github.source_label(), "github");
+
+        let apt = BinaryEntry::Apt(AptEntry {
+            package: "jq".to_string(),
+            binary: None,
+            version: None,
+            meta: CommonMeta::default(),
+        });
+        assert_eq!(apt.source_label(), "apt");
     }
 
     #[test]

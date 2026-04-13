@@ -86,6 +86,7 @@ $ grip check
 - **Mixed sources in one file** — GitHub Releases, direct URLs, APT, DNF, and custom shell scripts all declared in a single `grip.toml`. Shell installs record a SHA-256 checksum of the placed binary so `grip check` can verify them.
 - **Docker-native export** — `grip export --format dockerfile` generates lock-file-accurate `RUN` instructions, so your images don't need grip installed at build time.
 - **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
+- **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `allow_shell` opt-in guard for shell installs, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -101,6 +102,10 @@ $ grip check
 | Semver ranges | ✓ | ✗ | ✓ | ✗ |
 | Works on Linux + macOS | ✓ | ✓ | macOS-first | ✓ |
 | CI mode — fail on lock drift | ✓ `--locked` | ✗ | ✗ | ✗ |
+| CI mode — fail on unpinned versions | ✓ `--require-pins` | ✗ | ✗ | ✗ |
+| GPG signature verification | ✓ | ✗ | ✗ | ✗ |
+| Shell install opt-in guard | ✓ `allow_shell` | ✗ | ✗ | ✗ |
+| Post-install tamper detection | ✓ `grip lock verify` | ✗ | ✗ | ✗ |
 | Zero setup for consumers | ✓ `grip sync` | ✓ | requires brew | requires asdf |
 
 ---
@@ -217,6 +222,27 @@ Verify the install:
 ```sh
 grip --version
 ```
+
+---
+
+## Security
+
+grip includes layered supply chain attack protections:
+
+- **Shell installs blocked by default** — `allow_shell = true` must be explicitly set, and grip shows the command and prompts for confirmation before running it.
+- **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry; grip verifies the release asset signature before installing (direct `.sig`/`.asc` or signed `SHA256SUMS` file).
+- **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading.
+- **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".
+- **`grip doctor`** detects SHA256 drift, missing hashes in the lock, and unpinned entries.
+
+Recommended CI setup:
+
+```sh
+grip sync --locked --require-pins
+grip lock verify
+```
+
+See [SECURITY.md](SECURITY.md) for the full security guide including GPG setup, threat model, and CI configuration examples.
 
 ---
 

@@ -47,6 +47,11 @@ impl SourceAdapter for ShellAdapter {
             return Err(GripError::Other("expected shell entry".into()));
         };
 
+        if !s.allow_shell {
+            pb.finish_and_clear();
+            return Err(GripError::ShellNotAllowed { name: name.to_string() });
+        }
+
         pb.set_message(format!("{name}  running install script..."));
         let status = Command::new("sh")
             .args(["-c", &s.install_cmd])
@@ -84,9 +89,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn shell_entry(cmd: &str, version: Option<&str>) -> BinaryEntry {
+        shell_entry_with_allow(cmd, version, true)
+    }
+
+    fn shell_entry_with_allow(cmd: &str, version: Option<&str>, allow_shell: bool) -> BinaryEntry {
         BinaryEntry::Shell(ShellEntry {
             install_cmd: cmd.to_string(),
             version: version.map(String::from),
+            allow_shell,
             meta: CommonMeta::default(),
         })
     }
@@ -156,6 +166,27 @@ mod tests {
 
         assert!(result.sha256.is_none(), "sha256 must be None when no file is placed in .bin/");
         assert_eq!(result.version, "custom");
+    }
+
+    // ── install: allow_shell guard ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn install_blocked_when_allow_shell_false() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // allow_shell = false must block execution even for a harmless command.
+        let entry = shell_entry_with_allow("true", None, false);
+        let client = reqwest::Client::new();
+        let result = ShellAdapter
+            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .await;
+
+        assert!(
+            matches!(result, Err(crate::error::GripError::ShellNotAllowed { .. })),
+            "install must return ShellNotAllowed when allow_shell = false"
+        );
     }
 
     // ── install: failure handling ─────────────────────────────────────────────

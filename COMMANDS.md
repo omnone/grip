@@ -31,7 +31,8 @@ grip add BurntSushi/ripgrep                         # GitHub Releases shorthand
 grip add jq@1.7.1 --repo jqlang/jq --source github  # pin a version
 grip add libssl-dev --library                        # system library (no executable)
 grip add mytool --source url --url https://example.com/mytool.tar.gz
-grip add mytool --source shell --cmd 'curl -fsSL https://example.com/install.sh | sh -s -- --dir $GRIP_BIN_DIR'
+grip add mytool --source shell --allow-shell \
+  --cmd 'curl -fsSL https://example.com/install.sh | sh -s -- --dir $GRIP_BIN_DIR'
 ```
 
 | Flag | Description |
@@ -44,6 +45,15 @@ grip add mytool --source shell --cmd 'curl -fsSL https://example.com/install.sh 
 | `--binary <cmd>` | On-PATH command for apt/dnf when it differs from NAME (e.g. `rg` for `ripgrep`) |
 | `--library` | Add to `[libraries]` instead of `[binaries]` (apt/dnf only; no executable required) |
 | `--cmd <CMD>` | Shell command to run for `--source shell` (required for that source; `$GRIP_BIN_DIR` is set) |
+| `--allow-shell` | Set `allow_shell = true` on the new shell entry (required to run shell installs) |
+| `--gpg-fingerprint <FP>` | GPG key fingerprint to verify GitHub/URL release signatures |
+| `--sig-asset-pattern <GLOB>` | Glob to find the detached signature asset in a GitHub release (e.g. `"*.asc"`); auto-detected if omitted |
+| `--checksums-asset-pattern <GLOB>` | Glob to find a signed checksums file in a GitHub release (e.g. `"*SHA256SUMS"`); activates signed-checksums verification |
+| `--sig-url <URL>` | URL of the detached GPG signature file (URL source only) |
+| `--signed-checksums-url <URL>` | URL of a signed checksums file (URL source only); activates signed-checksums verification |
+| `--checksums-sig-url <URL>` | URL of the GPG signature for the checksums file (URL source only; required with `--signed-checksums-url`) |
+
+For a full explanation of the GPG verification modes, see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -53,9 +63,11 @@ Downloads and installs any missing binaries from `grip.toml` into `.bin/` concur
 
 ```sh
 grip sync
-grip sync --locked            # CI mode: fail if lock would change
-grip sync --tag dev           # only entries tagged "dev"
-grip sync --verify            # re-verify SHA256 of already-installed binaries
+grip sync --locked                  # CI mode: fail if lock would change
+grip sync --locked --require-pins   # also fail if any entry has no version pin
+grip sync --tag dev                 # only entries tagged "dev"
+grip sync --verify                  # re-verify SHA256 of already-installed binaries
+grip sync --yes                     # skip interactive confirmation for shell installs
 ```
 
 | Flag | Description |
@@ -63,6 +75,8 @@ grip sync --verify            # re-verify SHA256 of already-installed binaries
 | `--locked` | Fail if `grip.lock` would change; enforces reproducibility in CI |
 | `--verify` | Re-check SHA256 of on-disk binaries against `grip.lock` |
 | `--tag <tag>` | Only install entries that carry this tag |
+| `--require-pins` | Fail before touching the network if any entry has no version pin (prevents silent auto-upgrades in CI) |
+| `--yes` | Skip the interactive confirmation prompt for shell installs |
 
 ---
 
@@ -153,7 +167,16 @@ grip list --all    # all declared entries; uninstalled ones are highlighted
 
 ### `grip doctor`
 
-Checks consistency between `grip.toml`, `grip.lock`, and `.bin/`: detects orphaned lock entries, missing binaries, SHA256 drift, and libraries not present on the system. No flags.
+Checks consistency between `grip.toml`, `grip.lock`, and `.bin/`. No flags.
+
+Detects:
+- Orphaned lock entries (in lock but not in manifest)
+- Binaries declared but not yet installed
+- Binary on disk missing from `.bin/`
+- SHA256 drift — binary on disk no longer matches `grip.lock` (possible post-install tampering)
+- Lock entries with no sha256 for sources that always record one (`github`, `url`, `shell`) — may indicate the lock was hand-edited
+- Unpinned entries — entries with no version pin that could silently auto-upgrade
+- Libraries in the lock but not found on the system
 
 ---
 
@@ -172,6 +195,30 @@ Set `GRIP_CACHE_DIR` to override the cache location. Set it to an empty string t
 GRIP_CACHE_DIR=/tmp/my-cache grip sync   # custom cache location
 GRIP_CACHE_DIR= grip sync                # disable cache
 ```
+
+---
+
+### `grip lock verify`
+
+Re-hashes every binary in `.bin/` and compares the result against the sha256 recorded in `grip.lock`. Does not re-download anything or read `grip.toml` — purely a tamper-detection command.
+
+```sh
+grip lock verify
+```
+
+Output:
+
+```
+  grip lock verify
+
+  ✓  jq
+  ✓  rg
+  ⚠  fd  (no sha256 in lock — cannot verify)
+
+  OK  (2 verified, 1 without sha256)
+```
+
+Exits `1` if any binary's hash does not match. Suitable for CI pipelines. For the recommended CI setup combining `--locked`, `--require-pins`, and `grip lock verify`, see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -269,6 +316,22 @@ binary        = "jq"              # optional: name of the binary inside the arch
 
 **Semver ranges** (`^`, `~`, `>=`, `>`, `<`, `<=`, `*`) are resolved at install time against the GitHub releases list. The concrete version is written to `grip.lock`; `--locked` mode pins to that exact version on subsequent installs. If no `asset_pattern` is set, grip falls back to a platform-aware heuristic (matches on OS + architecture strings in the asset filename).
 
+**Optional GPG verification fields:**
+
+```toml
+[binaries.terraform]
+source                  = "github"
+repo                    = "hashicorp/terraform"
+version                 = "1.7.0"
+gpg_fingerprint         = "34365D9472D7468F"   # maintainer's key fingerprint
+checksums_asset_pattern = "*SHA256SUMS"         # signed checksums file (Mode 2)
+sig_asset_pattern       = "*SHA256SUMS.sig"     # signature of the checksums file
+# For direct binary signature (Mode 1), omit checksums_asset_pattern:
+# sig_asset_pattern = "*.asc"
+```
+
+See [SECURITY.md](SECURITY.md) for a full explanation of Mode 1 vs Mode 2 verification.
+
 ---
 
 ### Direct URL
@@ -279,6 +342,14 @@ source = "url"
 url    = "https://example.com/releases/mytool-linux-amd64.tar.gz"
 sha256 = "abc123..."  # optional hex digest; verified after download
 binary = "mytool"     # optional: name of the binary inside the archive
+
+# Optional GPG verification:
+gpg_fingerprint      = "AF436C3B58B2E3B2"
+# Mode 1 — direct binary signature:
+sig_url              = "https://example.com/releases/mytool-linux-amd64.tar.gz.sig"
+# Mode 2 — signed checksums file (takes precedence over sig_url):
+# signed_checksums_url = "https://example.com/SHA256SUMS"
+# checksums_sig_url    = "https://example.com/SHA256SUMS.sig"
 ```
 
 ---
@@ -320,20 +391,26 @@ Add with: `grip add libssl-dev --library`
 
 Runs an arbitrary shell command. `$GRIP_BIN_DIR` is set to the project's `.bin/` directory so the command can place the binary there.
 
+**Shell installs are blocked by default.** You must explicitly set `allow_shell = true` in `grip.toml` to permit execution. This protects against arbitrary code execution if `grip.toml` is compromised (e.g., a malicious PR that adds a shell entry).
+
 ```toml
 [binaries.mytool]
 source      = "shell"
 install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
 version     = "1.0"    # metadata only; not enforced by grip
+allow_shell = true     # must be explicitly set; false or absent blocks execution
 ```
 
-Add from the CLI with `--cmd` (required for `--source shell`):
+Add from the CLI with `--cmd` and `--allow-shell`:
 
 ```sh
 grip add mytool --source shell \
   --cmd 'curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR' \
-  --version 1.0
+  --version 1.0 \
+  --allow-shell
 ```
+
+Even with `allow_shell = true`, grip shows the `install_cmd` and prompts for confirmation before running it (when a TTY is attached). Use `grip sync --yes` to suppress the prompt in automation.
 
 After installation, grip computes the SHA-256 of the binary placed in `.bin/` (if any) and records it in `grip.lock`. This allows `grip check` to verify the binary has not been tampered with on subsequent runs.
 

@@ -16,6 +16,7 @@ Examples:
   grip add jq@1.7.1 --repo jqlang/jq
   grip sync
   grip check
+  grip lock verify
   grip outdated
   grip run jq --version
   eval \"$(grip env)\"
@@ -84,6 +85,29 @@ pub enum Commands {
             help = "Shell command to run for --source shell (required for that source)"
         )]
         cmd: Option<String>,
+        /// Set allow_shell = true in the manifest entry (required to run shell installs)
+        #[arg(long)]
+        allow_shell: bool,
+        /// GPG key fingerprint (or long key ID) to verify GitHub/URL release signatures
+        #[arg(long, value_name = "FINGERPRINT")]
+        gpg_fingerprint: Option<String>,
+        /// Glob pattern to find the detached signature asset in a GitHub release (e.g. "*.asc");
+        /// auto-detected if omitted (GitHub source only)
+        #[arg(long, value_name = "PATTERN")]
+        sig_asset_pattern: Option<String>,
+        /// Glob pattern to find the signed checksums file in a GitHub release
+        /// (e.g. "*SHA256SUMS*"); activates signed-checksums verification (GitHub source only)
+        #[arg(long, value_name = "PATTERN")]
+        checksums_asset_pattern: Option<String>,
+        /// URL of the detached GPG signature file (URL source only)
+        #[arg(long, value_name = "URL")]
+        sig_url: Option<String>,
+        /// URL of a signed checksums file (URL source only); activates signed-checksums verification
+        #[arg(long, value_name = "URL")]
+        signed_checksums_url: Option<String>,
+        /// URL of the GPG signature for the checksums file (URL source only); required with --signed-checksums-url
+        #[arg(long, value_name = "URL")]
+        checksums_sig_url: Option<String>,
     },
     /// Download and install any missing binaries from grip.toml into .bin/
     Sync {
@@ -96,6 +120,12 @@ pub enum Commands {
         /// Only install entries that include this tag
         #[arg(long)]
         tag: Option<String>,
+        /// Skip the interactive confirmation prompt for shell installs
+        #[arg(long)]
+        yes: bool,
+        /// Fail if any entry in grip.toml has no version pin (for CI; prevents silent auto-upgrades)
+        #[arg(long)]
+        require_pins: bool,
     },
     /// Run a command with .bin/ prepended to PATH
     Run {
@@ -143,6 +173,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+    /// Inspect and verify grip.lock
+    ///
+    /// Sub-commands operate on the lock file directly — no network, no manifest walk.
+    Lock {
+        #[command(subcommand)]
+        action: LockAction,
+    },
     /// Export install commands for use in Dockerfiles or CI scripts
     Export {
         /// Output format: dockerfile | shell | makefile
@@ -169,4 +206,14 @@ pub enum CacheAction {
     Clean,
     /// Show the number of cached files and total disk usage
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum LockAction {
+    /// Re-hash every binary in .bin/ and compare against grip.lock; exits non-zero on any mismatch
+    ///
+    /// Designed for CI: reads only the lock file (no network, no manifest walk) and
+    /// rehashes every .bin/ binary that has a recorded sha256.  Detects binaries that
+    /// were swapped or modified after installation.
+    Verify,
 }

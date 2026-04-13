@@ -16,6 +16,7 @@ use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::{BinaryEntry, GithubEntry};
 use crate::error::GripError;
+use crate::gpg::{verify_gpg_signature, verify_signed_checksums};
 use crate::output;
 use crate::platform::Platform;
 
@@ -159,6 +160,75 @@ impl SourceAdapter for GithubAdapter {
             )
             .await?
         };
+
+        // GPG / signed-checksums verification (opt-in via gpg_fingerprint in grip.toml)
+        if let Some(fingerprint) = &g.gpg_fingerprint {
+            pb.set_message(format!("{name}  verifying signature..."));
+
+            if let Some(checksums_pat) = &g.checksums_asset_pattern {
+                // ── Mode 2: signed checksums file ────────────────────────────
+                // Find the checksums asset, then find the signature of that checksums file.
+                let checksums_asset =
+                    find_asset_by_pattern(&release.assets, checksums_pat).ok_or_else(|| {
+                        GripError::GpgVerificationFailed {
+                            name: name.to_string(),
+                            detail: format!(
+                                "no checksums asset matched pattern '{}'; \
+                                 check checksums_asset_pattern in grip.toml",
+                                checksums_pat
+                            ),
+                        }
+                    })?;
+                let checksums_name = checksums_asset.name.clone();
+                let checksums_url = checksums_asset.browser_download_url.clone();
+
+                let checksums_sig_asset =
+                    find_sig_asset(&release.assets, &checksums_name, g.sig_asset_pattern.as_deref())
+                        .ok_or_else(|| GripError::GpgVerificationFailed {
+                            name: name.to_string(),
+                            detail: format!(
+                                "no signature asset found for checksums file '{}'; \
+                                 set sig_asset_pattern in grip.toml to locate it explicitly",
+                                checksums_name
+                            ),
+                        })?;
+
+                let checksums_tmp = tempfile::NamedTempFile::new()?;
+                let sig_tmp = tempfile::NamedTempFile::new()?;
+                download_asset(client, &checksums_url, checksums_tmp.path()).await?;
+                download_asset(
+                    client,
+                    &checksums_sig_asset.browser_download_url,
+                    sig_tmp.path(),
+                )
+                .await?;
+
+                verify_signed_checksums(
+                    tmp.path(),
+                    checksums_tmp.path(),
+                    sig_tmp.path(),
+                    fingerprint,
+                    &asset_name,
+                    name,
+                )?;
+            } else {
+                // ── Mode 1: direct binary signature ──────────────────────────
+                let sig_asset =
+                    find_sig_asset(&release.assets, &asset_name, g.sig_asset_pattern.as_deref())
+                        .ok_or_else(|| GripError::GpgVerificationFailed {
+                            name: name.to_string(),
+                            detail: format!(
+                                "no signature asset found in release for '{}'; \
+                                 set sig_asset_pattern in grip.toml to locate it explicitly",
+                                asset_name
+                            ),
+                        })?;
+
+                let sig_tmp = tempfile::NamedTempFile::new()?;
+                download_asset(client, &sig_asset.browser_download_url, sig_tmp.path()).await?;
+                verify_gpg_signature(tmp.path(), sig_tmp.path(), fingerprint, name)?;
+            }
+        }
 
         // Extract or copy
         pb.set_message(format!("{name}  extracting..."));
@@ -380,4 +450,108 @@ fn walkdir_find(dir: &Path, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Find a release asset whose name matches `pattern` (glob).
+fn find_asset_by_pattern<'a>(assets: &'a [Asset], pattern: &str) -> Option<&'a Asset> {
+    let g = glob::Pattern::new(pattern).ok()?;
+    assets.iter().find(|a| g.matches(&a.name))
+}
+
+/// Download `url` to `dest` without a progress bar (used for small ancillary files like
+/// signature files and checksums).
+async fn download_asset(client: &Client, url: &str, dest: &std::path::Path) -> Result<(), GripError> {
+    let mut resp = client
+        .get(url)
+        .header("User-Agent", "grip/0.1")
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| GripError::GitHubApi(e.to_string()))?;
+    let mut file = std::fs::File::create(dest)?;
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk)?;
+    }
+    Ok(())
+}
+
+/// Find the detached signature asset for `asset_name` in the release asset list.
+///
+/// If `sig_pattern` is provided it is used as a glob; otherwise common naming conventions
+/// are tried in order: `<asset>.sig`, `<asset>.asc`, `checksums.txt.sig`, `checksums.txt.asc`,
+/// `SHA256SUMS.asc`, `SHA256SUMS.sig`.
+fn find_sig_asset<'a>(
+    assets: &'a [Asset],
+    asset_name: &str,
+    sig_pattern: Option<&str>,
+) -> Option<&'a Asset> {
+    if let Some(pat) = sig_pattern {
+        if let Ok(g) = glob::Pattern::new(pat) {
+            return assets.iter().find(|a| g.matches(&a.name));
+        }
+    }
+    let candidates = [
+        format!("{asset_name}.sig"),
+        format!("{asset_name}.asc"),
+        "checksums.txt.sig".to_string(),
+        "checksums.txt.asc".to_string(),
+        "SHA256SUMS.asc".to_string(),
+        "SHA256SUMS.sig".to_string(),
+        "checksums.sig".to_string(),
+        "checksums.asc".to_string(),
+    ];
+    assets.iter().find(|a| candidates.iter().any(|c| c == &a.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── find_sig_asset ────────────────────────────────────────────────────────
+
+    fn make_assets(names: &[&str]) -> Vec<Asset> {
+        names
+            .iter()
+            .map(|n| Asset {
+                name: n.to_string(),
+                browser_download_url: format!("https://example.com/{n}"),
+                size: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn find_sig_asset_prefers_explicit_pattern() {
+        let assets = make_assets(&["tool.tar.gz", "tool.tar.gz.sig", "tool.tar.gz.asc"]);
+        let found = find_sig_asset(&assets, "tool.tar.gz", Some("*.asc"));
+        assert_eq!(found.map(|a| a.name.as_str()), Some("tool.tar.gz.asc"));
+    }
+
+    #[test]
+    fn find_sig_asset_auto_detects_dot_sig() {
+        let assets = make_assets(&["tool.tar.gz", "tool.tar.gz.sig"]);
+        let found = find_sig_asset(&assets, "tool.tar.gz", None);
+        assert_eq!(found.map(|a| a.name.as_str()), Some("tool.tar.gz.sig"));
+    }
+
+    #[test]
+    fn find_sig_asset_auto_detects_dot_asc() {
+        let assets = make_assets(&["tool.tar.gz", "tool.tar.gz.asc"]);
+        let found = find_sig_asset(&assets, "tool.tar.gz", None);
+        assert_eq!(found.map(|a| a.name.as_str()), Some("tool.tar.gz.asc"));
+    }
+
+    #[test]
+    fn find_sig_asset_auto_detects_checksums_asc() {
+        let assets = make_assets(&["tool.tar.gz", "checksums.txt.asc"]);
+        let found = find_sig_asset(&assets, "tool.tar.gz", None);
+        assert_eq!(found.map(|a| a.name.as_str()), Some("checksums.txt.asc"));
+    }
+
+    #[test]
+    fn find_sig_asset_returns_none_when_absent() {
+        let assets = make_assets(&["tool.tar.gz", "tool.tar.gz.sha256"]);
+        let found = find_sig_asset(&assets, "tool.tar.gz", None);
+        assert!(found.is_none());
+    }
 }

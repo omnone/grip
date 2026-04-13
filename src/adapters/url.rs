@@ -14,6 +14,7 @@ use crate::checksum::ChecksumWriter;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::BinaryEntry;
 use crate::error::GripError;
+use crate::gpg::{verify_gpg_signature, verify_signed_checksums};
 use crate::output;
 
 /// Downloads a binary (or archive) from a URL, optionally verifies its SHA-256, and installs it.
@@ -76,6 +77,48 @@ impl SourceAdapter for UrlAdapter {
                     expected: expected.clone(),
                     got: sha256,
                 });
+            }
+        }
+
+        // GPG / signed-checksums verification (opt-in via gpg_fingerprint in grip.toml)
+        if let Some(fingerprint) = &u.gpg_fingerprint {
+            pb.set_message(format!("{name}  verifying signature..."));
+
+            if let Some(checksums_url) = &u.signed_checksums_url {
+                // ── Mode 2: signed checksums file ────────────────────────────
+                let checksums_sig_url = u.checksums_sig_url.as_deref().ok_or_else(|| {
+                    GripError::GpgVerificationFailed {
+                        name: name.to_string(),
+                        detail: "signed_checksums_url is set but checksums_sig_url is missing \
+                                 in grip.toml"
+                            .to_string(),
+                    }
+                })?;
+                let asset_filename = u.url.split('/').next_back().unwrap_or("download");
+                let checksums_tmp = tempfile::NamedTempFile::new()?;
+                let checksums_sig_tmp = tempfile::NamedTempFile::new()?;
+                download_url(client, checksums_url, checksums_tmp.path()).await?;
+                download_url(client, checksums_sig_url, checksums_sig_tmp.path()).await?;
+                verify_signed_checksums(
+                    tmp.path(),
+                    checksums_tmp.path(),
+                    checksums_sig_tmp.path(),
+                    fingerprint,
+                    asset_filename,
+                    name,
+                )?;
+            } else {
+                // ── Mode 1: direct binary signature ──────────────────────────
+                let sig_url = u.sig_url.as_deref().ok_or_else(|| {
+                    GripError::GpgVerificationFailed {
+                        name: name.to_string(),
+                        detail: "gpg_fingerprint is set but sig_url is missing in grip.toml"
+                            .to_string(),
+                    }
+                })?;
+                let sig_tmp = tempfile::NamedTempFile::new()?;
+                download_url(client, sig_url, sig_tmp.path()).await?;
+                verify_gpg_signature(tmp.path(), sig_tmp.path(), fingerprint, name)?;
             }
         }
 
@@ -153,6 +196,16 @@ async fn download_url_to_file(
     }
     let (_, sha256) = writer.finalize();
     Ok(sha256)
+}
+
+/// Download `url` to `dest` without a progress indicator (for small ancillary files).
+async fn download_url(client: &Client, url: &str, dest: &Path) -> Result<(), GripError> {
+    let mut resp = client.get(url).send().await?.error_for_status()?;
+    let mut file = std::fs::File::create(dest)?;
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk)?;
+    }
+    Ok(())
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), GripError> {
