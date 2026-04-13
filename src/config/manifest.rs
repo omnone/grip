@@ -239,3 +239,245 @@ pub fn find_manifest_dir(start: &Path) -> Option<PathBuf> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_meta(
+        required: Option<bool>,
+        platforms: Option<Vec<&str>>,
+        tags: Option<Vec<&str>>,
+    ) -> CommonMeta {
+        CommonMeta {
+            required,
+            platforms: platforms.map(|v| v.into_iter().map(String::from).collect()),
+            tags: tags.map(|v| v.into_iter().map(String::from).collect()),
+            post_install: None,
+        }
+    }
+
+    // ── CommonMeta ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_required_defaults_to_true() {
+        assert!(make_meta(None, None, None).is_required());
+    }
+
+    #[test]
+    fn is_required_explicit_true() {
+        assert!(make_meta(Some(true), None, None).is_required());
+    }
+
+    #[test]
+    fn is_required_explicit_false() {
+        assert!(!make_meta(Some(false), None, None).is_required());
+    }
+
+    #[test]
+    fn matches_platform_no_filter() {
+        let meta = make_meta(None, None, None);
+        assert!(meta.matches_platform("linux"));
+        assert!(meta.matches_platform("darwin"));
+    }
+
+    #[test]
+    fn matches_platform_with_filter_hit() {
+        let meta = make_meta(None, Some(vec!["linux", "darwin"]), None);
+        assert!(meta.matches_platform("linux"));
+        assert!(meta.matches_platform("darwin"));
+    }
+
+    #[test]
+    fn matches_platform_with_filter_miss() {
+        let meta = make_meta(None, Some(vec!["linux"]), None);
+        assert!(!meta.matches_platform("darwin"));
+        assert!(!meta.matches_platform("windows"));
+    }
+
+    #[test]
+    fn has_tag_no_tags() {
+        assert!(!make_meta(None, None, None).has_tag("ci"));
+    }
+
+    #[test]
+    fn has_tag_hit() {
+        let meta = make_meta(None, None, Some(vec!["ci", "dev"]));
+        assert!(meta.has_tag("ci"));
+        assert!(meta.has_tag("dev"));
+    }
+
+    #[test]
+    fn has_tag_miss() {
+        let meta = make_meta(None, None, Some(vec!["ci"]));
+        assert!(!meta.has_tag("dev"));
+    }
+
+    // ── Manifest::empty ───────────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_empty_has_no_entries() {
+        let m = Manifest::empty();
+        assert!(m.binaries.is_empty());
+        assert!(m.libraries.is_empty());
+    }
+
+    // ── Manifest round-trip ───────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_save_and_load_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.toml");
+
+        let mut m = Manifest::empty();
+        m.binaries.insert(
+            "rg".to_string(),
+            BinaryEntry::Github(GithubEntry {
+                repo: "BurntSushi/ripgrep".to_string(),
+                version: Some("14.0.0".to_string()),
+                asset_pattern: None,
+                binary: None,
+                meta: CommonMeta::default(),
+            }),
+        );
+        m.save(&path).unwrap();
+
+        let loaded = Manifest::load(&path).unwrap();
+        assert_eq!(loaded.binaries.len(), 1);
+        let entry = loaded.binaries.get("rg").unwrap();
+        if let BinaryEntry::Github(g) = entry {
+            assert_eq!(g.repo, "BurntSushi/ripgrep");
+            assert_eq!(g.version.as_deref(), Some("14.0.0"));
+        } else {
+            panic!("expected Github entry");
+        }
+    }
+
+    #[test]
+    fn manifest_load_invalid_toml_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.toml");
+        std::fs::write(&path, "not valid toml [[[[").unwrap();
+        assert!(Manifest::load(&path).is_err());
+    }
+
+    // ── BinaryEntry::pin_version ──────────────────────────────────────────────
+
+    #[test]
+    fn pin_version_github() {
+        let entry = BinaryEntry::Github(GithubEntry {
+            repo: "cli/cli".to_string(),
+            version: None,
+            asset_pattern: None,
+            binary: None,
+            meta: CommonMeta::default(),
+        });
+        let pinned = entry.pin_version("2.40.0");
+        if let BinaryEntry::Github(g) = pinned {
+            assert_eq!(g.version.as_deref(), Some("2.40.0"));
+        } else {
+            panic!("expected Github entry");
+        }
+    }
+
+    #[test]
+    fn pin_version_apt() {
+        let entry = BinaryEntry::Apt(AptEntry {
+            package: "jq".to_string(),
+            binary: None,
+            version: None,
+            meta: CommonMeta::default(),
+        });
+        let pinned = entry.pin_version("1.6");
+        if let BinaryEntry::Apt(a) = pinned {
+            assert_eq!(a.version.as_deref(), Some("1.6"));
+        } else {
+            panic!("expected Apt entry");
+        }
+    }
+
+    #[test]
+    fn pin_version_dnf() {
+        let entry = BinaryEntry::Dnf(DnfEntry {
+            package: "jq".to_string(),
+            binary: None,
+            version: None,
+            meta: CommonMeta::default(),
+        });
+        let pinned = entry.pin_version("1.6");
+        if let BinaryEntry::Dnf(d) = pinned {
+            assert_eq!(d.version.as_deref(), Some("1.6"));
+        } else {
+            panic!("expected Dnf entry");
+        }
+    }
+
+    #[test]
+    fn pin_version_shell() {
+        let entry = BinaryEntry::Shell(ShellEntry {
+            install_cmd: "echo hi".to_string(),
+            version: None,
+            meta: CommonMeta::default(),
+        });
+        let pinned = entry.pin_version("0.1.0");
+        if let BinaryEntry::Shell(s) = pinned {
+            assert_eq!(s.version.as_deref(), Some("0.1.0"));
+        } else {
+            panic!("expected Shell entry");
+        }
+    }
+
+    // ── BinaryEntry::meta ─────────────────────────────────────────────────────
+
+    #[test]
+    fn binary_entry_meta_returns_inner_meta() {
+        let meta = CommonMeta {
+            required: Some(false),
+            platforms: None,
+            tags: None,
+            post_install: None,
+        };
+        let entry = BinaryEntry::Github(GithubEntry {
+            repo: "a/b".to_string(),
+            version: None,
+            asset_pattern: None,
+            binary: None,
+            meta: meta.clone(),
+        });
+        assert_eq!(entry.meta().required, Some(false));
+    }
+
+    // ── find_manifest_dir ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_manifest_dir_finds_in_start() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "").unwrap();
+        let result = find_manifest_dir(tmp.path());
+        assert_eq!(result, Some(tmp.path().to_path_buf()));
+    }
+
+    #[test]
+    fn find_manifest_dir_finds_in_parent() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "").unwrap();
+        let child = tmp.path().join("subdir");
+        std::fs::create_dir_all(&child).unwrap();
+        let result = find_manifest_dir(&child);
+        assert_eq!(result, Some(tmp.path().to_path_buf()));
+    }
+
+    #[test]
+    fn find_manifest_dir_returns_none_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        // No grip.toml written – should not find one (assuming tmp is isolated).
+        // We start from a leaf directory well below the root of the temp tree.
+        let leaf = tmp.path().join("a/b/c");
+        std::fs::create_dir_all(&leaf).unwrap();
+        // Only returns None when there's truly no grip.toml up the chain;
+        // since TempDir is under /tmp, the walk will stop at filesystem root.
+        let result = find_manifest_dir(&leaf);
+        assert!(result.is_none());
+    }
+}

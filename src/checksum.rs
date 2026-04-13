@@ -53,3 +53,75 @@ pub fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    // Known SHA-256 of the empty string:
+    // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    const EMPTY_SHA256: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    // Known SHA-256 of b"hello":
+    // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    const HELLO_SHA256: &str =
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    // ── ChecksumWriter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn checksum_writer_empty_input() {
+        let buf: Vec<u8> = Vec::new();
+        let mut writer = ChecksumWriter::new(buf);
+        writer.flush().unwrap();
+        let (_, hash) = writer.finalize();
+        assert_eq!(hash, EMPTY_SHA256);
+    }
+
+    #[test]
+    fn checksum_writer_known_input() {
+        let buf: Vec<u8> = Vec::new();
+        let mut writer = ChecksumWriter::new(buf);
+        writer.write_all(b"hello").unwrap();
+        let (inner, hash) = writer.finalize();
+        assert_eq!(hash, HELLO_SHA256);
+        assert_eq!(inner, b"hello");
+    }
+
+    #[test]
+    fn checksum_writer_multi_chunk() {
+        let buf: Vec<u8> = Vec::new();
+        let mut writer = ChecksumWriter::new(buf);
+        writer.write_all(b"hel").unwrap();
+        writer.write_all(b"lo").unwrap();
+        let (_, hash) = writer.finalize();
+        assert_eq!(hash, HELLO_SHA256);
+    }
+
+    // ── sha256_file ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn sha256_file_empty_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.flush().unwrap();
+        let hash = sha256_file(f.path()).unwrap();
+        assert_eq!(hash, EMPTY_SHA256);
+    }
+
+    #[test]
+    fn sha256_file_known_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"hello").unwrap();
+        f.flush().unwrap();
+        let hash = sha256_file(f.path()).unwrap();
+        assert_eq!(hash, HELLO_SHA256);
+    }
+
+    #[test]
+    fn sha256_file_missing_path_returns_error() {
+        let result = sha256_file(std::path::Path::new("/nonexistent/path/to/file"));
+        assert!(result.is_err());
+    }
+}

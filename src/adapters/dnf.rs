@@ -68,8 +68,7 @@ impl SourceAdapter for DnfAdapter {
         let cmd_name = d.binary.as_deref().unwrap_or(name);
 
         // If already on PATH, skip installation and just symlink.
-        let which_pre = Command::new("which").arg(cmd_name).output()?;
-        if !which_pre.status.success() {
+        if find_in_path(cmd_name).is_none() {
             let priv_mode = check_privileges()?;
 
             pb.set_message(format!("{name}  refreshing package metadata..."));
@@ -85,16 +84,13 @@ impl SourceAdapter for DnfAdapter {
             }
         }
 
-        let which = Command::new("which").arg(cmd_name).output()?;
-        if !which.status.success() {
-            return Err(GripError::CommandFailed(format!(
+        let target = find_in_path(cmd_name).ok_or_else(|| {
+            GripError::CommandFailed(format!(
                 "installed package `{}` but `{cmd_name}` is not on PATH; \
                  set `binary = \"...\"` in grip.toml if the executable uses another name",
                 d.package
-            )));
-        }
-        let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
-        let target = std::path::PathBuf::from(&path_str);
+            ))
+        })?;
         symlink_binary(&target, bin_dir, name)?;
 
         let version = installed_version(&d.package).unwrap_or_else(|| "unknown".to_string());
@@ -186,9 +182,18 @@ fn dnf(
     Ok(status)
 }
 
-/// Returns `true` if `cmd` is found on PATH via `which`.
+/// Returns `true` if `cmd` is found somewhere on PATH.
 fn which_exists(cmd: &str) -> bool {
-    Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
+    find_in_path(cmd).is_some()
+}
+
+/// Searches PATH directories for `cmd` and returns the full path if found.
+fn find_in_path(cmd: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(cmd))
+            .find(|p| p.is_file())
+    })
 }
 
 /// Query the actual installed version via rpm.

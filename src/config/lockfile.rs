@@ -90,3 +90,127 @@ impl LockFile {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    fn make_entry(name: &str, version: &str, source: &str) -> LockEntry {
+        LockEntry {
+            name: name.to_string(),
+            version: version.to_string(),
+            source: source.to_string(),
+            url: None,
+            sha256: None,
+            installed_at: Utc::now(),
+        }
+    }
+
+    // ── get / upsert / remove ─────────────────────────────────────────────────
+
+    #[test]
+    fn get_returns_none_for_empty_lockfile() {
+        let lf = LockFile::default();
+        assert!(lf.get("rg").is_none());
+    }
+
+    #[test]
+    fn upsert_inserts_new_entry() {
+        let mut lf = LockFile::default();
+        lf.upsert(make_entry("rg", "14.0.0", "github"));
+        assert_eq!(lf.get("rg").unwrap().version, "14.0.0");
+    }
+
+    #[test]
+    fn upsert_replaces_existing_entry() {
+        let mut lf = LockFile::default();
+        lf.upsert(make_entry("rg", "13.0.0", "github"));
+        lf.upsert(make_entry("rg", "14.0.0", "github"));
+        assert_eq!(lf.entries.len(), 1);
+        assert_eq!(lf.get("rg").unwrap().version, "14.0.0");
+    }
+
+    #[test]
+    fn remove_deletes_entry() {
+        let mut lf = LockFile::default();
+        lf.upsert(make_entry("rg", "14.0.0", "github"));
+        lf.remove("rg");
+        assert!(lf.get("rg").is_none());
+        assert!(lf.entries.is_empty());
+    }
+
+    #[test]
+    fn remove_is_noop_when_absent() {
+        let mut lf = LockFile::default();
+        lf.remove("nonexistent"); // must not panic
+        assert!(lf.entries.is_empty());
+    }
+
+    // ── library variants ──────────────────────────────────────────────────────
+
+    #[test]
+    fn upsert_library_inserts_and_replaces() {
+        let mut lf = LockFile::default();
+        lf.upsert_library(make_entry("libssl-dev", "3.0.0", "apt"));
+        assert_eq!(lf.get_library("libssl-dev").unwrap().version, "3.0.0");
+
+        lf.upsert_library(make_entry("libssl-dev", "3.1.0", "apt"));
+        assert_eq!(lf.library_entries.len(), 1);
+        assert_eq!(lf.get_library("libssl-dev").unwrap().version, "3.1.0");
+    }
+
+    #[test]
+    fn remove_library_deletes_entry() {
+        let mut lf = LockFile::default();
+        lf.upsert_library(make_entry("libssl-dev", "3.0.0", "apt"));
+        lf.remove_library("libssl-dev");
+        assert!(lf.get_library("libssl-dev").is_none());
+    }
+
+    // ── load / save round-trip ────────────────────────────────────────────────
+
+    #[test]
+    fn load_returns_default_when_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.lock");
+        let lf = LockFile::load(&path).unwrap();
+        assert!(lf.entries.is_empty());
+        assert!(lf.library_entries.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.lock");
+
+        let mut lf = LockFile::default();
+        lf.upsert(LockEntry {
+            name: "jq".to_string(),
+            version: "1.7.1".to_string(),
+            source: "github".to_string(),
+            url: Some("https://example.com/jq".to_string()),
+            sha256: Some("abc123".to_string()),
+            installed_at: Utc::now(),
+        });
+        lf.save(&path).unwrap();
+
+        let loaded = LockFile::load(&path).unwrap();
+        let entry = loaded.get("jq").unwrap();
+        assert_eq!(entry.version, "1.7.1");
+        assert_eq!(entry.source, "github");
+        assert_eq!(entry.sha256.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn save_is_atomic_via_rename() {
+        // save() writes .lock.tmp then renames; the final file must exist and be valid TOML
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.lock");
+        let lf = LockFile::default();
+        lf.save(&path).unwrap();
+        assert!(path.exists());
+        assert!(!tmp.path().join("grip.lock.tmp").exists());
+    }
+}

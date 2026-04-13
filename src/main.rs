@@ -661,8 +661,8 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
         return Ok(());
     }
 
-    if !cfg.quiet {
-        if !lock.entries.is_empty() {
+    if !lock.entries.is_empty() {
+        if !cfg.quiet {
             println!();
             let header = output::dim(color, "Installed binaries (from grip.lock)");
             println!("  {header}");
@@ -672,17 +672,19 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
                 "NAME", "VERSION", "SOURCE", "INSTALLED AT"
             );
             println!("  {}", "-".repeat(66));
-            for e in &lock.entries {
-                println!(
-                    "  {:<18} {:<14} {:<10} {}",
-                    e.name,
-                    e.version,
-                    e.source,
-                    e.installed_at.format("%Y-%m-%d %H:%M")
-                );
-            }
         }
-        if !lock.library_entries.is_empty() {
+        for e in &lock.entries {
+            println!(
+                "  {:<18} {:<14} {:<10} {}",
+                e.name,
+                e.version,
+                e.source,
+                e.installed_at.format("%Y-%m-%d %H:%M")
+            );
+        }
+    }
+    if !lock.library_entries.is_empty() {
+        if !cfg.quiet {
             println!();
             let header = output::dim(color, "Installed libraries (from grip.lock)");
             println!("  {header}");
@@ -692,15 +694,15 @@ fn cmd_list(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), Gri
                 "NAME", "VERSION", "SOURCE", "INSTALLED AT"
             );
             println!("  {}", "-".repeat(66));
-            for e in &lock.library_entries {
-                println!(
-                    "  {:<18} {:<14} {:<10} {}",
-                    e.name,
-                    e.version,
-                    e.source,
-                    e.installed_at.format("%Y-%m-%d %H:%M")
-                );
-            }
+        }
+        for e in &lock.library_entries {
+            println!(
+                "  {:<18} {:<14} {:<10} {}",
+                e.name,
+                e.version,
+                e.source,
+                e.installed_at.format("%Y-%m-%d %H:%M")
+            );
         }
     }
     Ok(())

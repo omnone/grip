@@ -447,9 +447,7 @@ fn handle_install_result(
 }
 
 fn which_exists(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|dir| dir.join(cmd).is_file()))
         .unwrap_or(false)
 }

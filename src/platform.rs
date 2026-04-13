@@ -67,3 +67,74 @@ impl Platform {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make(os: OS, arch: Arch) -> Platform {
+        Platform { os, arch }
+    }
+
+    // ── os_str ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn os_str_linux() {
+        assert_eq!(make(OS::Linux, Arch::X86_64).os_str(), "linux");
+    }
+
+    #[test]
+    fn os_str_macos() {
+        assert_eq!(make(OS::MacOS, Arch::X86_64).os_str(), "darwin");
+    }
+
+    #[test]
+    fn os_str_windows() {
+        assert_eq!(make(OS::Windows, Arch::X86_64).os_str(), "windows");
+    }
+
+    #[test]
+    fn os_str_other() {
+        assert_eq!(make(OS::Other("freebsd".into()), Arch::X86_64).os_str(), "freebsd");
+    }
+
+    // ── arch_str ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn arch_str_x86_64() {
+        assert_eq!(make(OS::Linux, Arch::X86_64).arch_str(), "amd64");
+    }
+
+    #[test]
+    fn arch_str_aarch64() {
+        assert_eq!(make(OS::Linux, Arch::Aarch64).arch_str(), "arm64");
+    }
+
+    #[test]
+    fn arch_str_other() {
+        assert_eq!(make(OS::Linux, Arch::Other("riscv64".into())).arch_str(), "riscv64");
+    }
+
+    // ── is_linux ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_linux_true_for_linux() {
+        assert!(make(OS::Linux, Arch::X86_64).is_linux());
+    }
+
+    #[test]
+    fn is_linux_false_for_other() {
+        assert!(!make(OS::MacOS, Arch::X86_64).is_linux());
+        assert!(!make(OS::Windows, Arch::X86_64).is_linux());
+    }
+
+    // ── Platform::current ─────────────────────────────────────────────────────
+
+    #[test]
+    fn current_returns_valid_platform() {
+        let p = Platform::current();
+        // os_str must be non-empty and arch_str must be non-empty
+        assert!(!p.os_str().is_empty());
+        assert!(!p.arch_str().is_empty());
+    }
+}

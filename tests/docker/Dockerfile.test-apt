@@ -1,0 +1,45 @@
+# Integration test image for the APT adapter.
+#
+# Based on the official Rust image (Debian Bookworm) so apt-get is available
+# and the Rust toolchain is pre-installed.  The container runs as root so
+# apt-get installs work without sudo.
+#
+# Build & run (from the repository root):
+#   make test-integration-apt
+
+FROM rust:slim-bookworm
+
+# System packages needed to compile grip (OpenSSL for reqwest rustls, etc.)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Gate that tells integration tests they are running inside this container.
+ENV GRIP_INTEGRATION_TESTS=1
+
+WORKDIR /app
+
+# Layer 1: cache dependency compilation.
+# Copy only the manifests and a dummy main first so that `cargo build --tests`
+# can cache the dependency graph even when source files change.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --tests 2>/dev/null || true && \
+    rm -rf src
+
+# Layer 2: copy the real source and build the integration test binary.
+COPY src ./src
+COPY tests ./tests
+
+# Compile tests (this also compiles the `grip` binary via CARGO_BIN_EXE_grip).
+RUN cargo test --test integration_apt --no-run
+
+# Run the ignored integration tests.
+# We pass --test-threads=1 because multiple tests installing packages concurrently
+# can cause apt-get lock conflicts.
+CMD ["cargo", "test", "--test", "integration_apt", "--", \
+     "--include-ignored", "--test-threads=1", "--nocapture"]

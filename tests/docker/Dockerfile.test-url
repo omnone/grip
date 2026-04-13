@@ -1,0 +1,40 @@
+# Integration test image for the URL adapter.
+#
+# Based on the official Rust image (Debian Bookworm).
+# Requires outbound HTTPS to download binaries from direct URLs.
+# The container runs as root (no sudo needed).
+#
+# Build & run (from the repository root):
+#   make test-integration-url
+
+FROM rust:slim-bookworm
+
+# System packages needed to compile grip.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Gate that tells integration tests they are running inside this container.
+ENV GRIP_INTEGRATION_TESTS=1
+
+WORKDIR /app
+
+# Layer 1: cache dependency compilation.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --tests 2>/dev/null || true && \
+    rm -rf src
+
+# Layer 2: copy real source and build the test binary.
+COPY src ./src
+COPY tests ./tests
+
+RUN cargo test --test integration_url --no-run
+
+# Run the ignored integration tests.
+CMD ["cargo", "test", "--test", "integration_url", "--", \
+     "--include-ignored", "--test-threads=1", "--nocapture"]

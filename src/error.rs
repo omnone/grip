@@ -111,3 +111,101 @@ pub fn print_grip_error(err: &GripError, verbose: bool) {
         eprintln!("hint: {h}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── hint ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_not_found_has_hint() {
+        assert!(GripError::ManifestNotFound.hint().is_some());
+    }
+
+    #[test]
+    fn unknown_adapter_has_hint() {
+        assert!(GripError::UnknownAdapter("nope".into()).hint().is_some());
+    }
+
+    #[test]
+    fn checksum_mismatch_has_hint() {
+        let err = GripError::ChecksumMismatch {
+            expected: "abc".into(),
+            got: "def".into(),
+        };
+        assert!(err.hint().is_some());
+    }
+
+    #[test]
+    fn no_matching_asset_has_hint() {
+        assert!(GripError::NoMatchingAsset("*.tar.gz".into()).hint().is_some());
+    }
+
+    #[test]
+    fn binary_not_found_has_hint() {
+        assert!(GripError::BinaryNotFound("jq".into()).hint().is_some());
+    }
+
+    #[test]
+    fn unsupported_platform_has_hint() {
+        assert!(GripError::UnsupportedPlatform { adapter: "apt".into() }.hint().is_some());
+    }
+
+    #[test]
+    fn github_api_error_has_hint() {
+        assert!(GripError::GitHubApi("404".into()).hint().is_some());
+    }
+
+    #[test]
+    fn insufficient_privileges_has_hint() {
+        assert!(GripError::InsufficientPrivileges { hint: "run as root".into() }.hint().is_some());
+    }
+
+    #[test]
+    fn command_failed_has_hint() {
+        assert!(GripError::CommandFailed("exit 1".into()).hint().is_some());
+    }
+
+    #[test]
+    fn other_repo_required_has_hint() {
+        let err = GripError::Other("--repo required for GitHub".into());
+        assert!(err.hint().is_some());
+    }
+
+    #[test]
+    fn other_url_required_has_hint() {
+        let err = GripError::Other("--url required for url source".into());
+        assert!(err.hint().is_some());
+    }
+
+    #[test]
+    fn other_not_found_in_grip_toml_has_hint() {
+        let err = GripError::Other("jq not found in grip.toml".into());
+        assert!(err.hint().is_some());
+    }
+
+    // ── format_user_message ───────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_not_found_message() {
+        let msg = GripError::ManifestNotFound.format_user_message(false);
+        assert!(msg.contains("grip.toml"));
+    }
+
+    #[test]
+    fn other_error_message() {
+        let msg = GripError::Other("something went wrong".into()).format_user_message(false);
+        assert_eq!(msg, "something went wrong");
+    }
+
+    #[test]
+    fn checksum_mismatch_message_contains_values() {
+        let err = GripError::ChecksumMismatch {
+            expected: "aaa".into(),
+            got: "bbb".into(),
+        };
+        let msg = err.format_user_message(false);
+        assert!(msg.contains("aaa") && msg.contains("bbb"));
+    }
+}

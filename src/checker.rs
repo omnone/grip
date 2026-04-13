@@ -270,3 +270,247 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    use crate::config::lockfile::{LockEntry, LockFile};
+    use crate::config::manifest::{
+        BinaryEntry, CommonMeta, GithubEntry,
+    };
+
+    // ── versions_match ────────────────────────────────────────────────────────
+
+    #[test]
+    fn versions_match_identical() {
+        assert!(versions_match("1.0.0", "1.0.0"));
+    }
+
+    #[test]
+    fn versions_match_v_prefix_stripped() {
+        assert!(versions_match("1.0.0", "v1.0.0"));
+        assert!(versions_match("v1.0.0", "1.0.0"));
+        assert!(versions_match("v1.0.0", "v1.0.0"));
+    }
+
+    #[test]
+    fn versions_match_case_insensitive() {
+        assert!(versions_match("1.0.0-BETA", "1.0.0-beta"));
+    }
+
+    #[test]
+    fn versions_match_different_versions() {
+        assert!(!versions_match("1.0.0", "2.0.0"));
+        assert!(!versions_match("v1.2.3", "v1.2.4"));
+    }
+
+    // ── check_one helpers ─────────────────────────────────────────────────────
+
+    fn make_lock_entry(name: &str, version: &str, sha256: Option<&str>) -> LockEntry {
+        LockEntry {
+            name: name.to_string(),
+            version: version.to_string(),
+            source: "github".to_string(),
+            url: None,
+            sha256: sha256.map(String::from),
+            installed_at: Utc::now(),
+        }
+    }
+
+    fn github_entry(version: Option<&str>) -> BinaryEntry {
+        BinaryEntry::Github(GithubEntry {
+            repo: "a/b".to_string(),
+            version: version.map(String::from),
+            asset_pattern: None,
+            binary: None,
+            meta: CommonMeta::default(),
+        })
+    }
+
+    // ── check_one: MissingBinary ──────────────────────────────────────────────
+
+    #[test]
+    fn check_one_missing_binary() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let lf = LockFile::default();
+        let status = check_one("jq", &github_entry(None), &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::MissingBinary));
+    }
+
+    // ── check_one: MissingLockEntry ───────────────────────────────────────────
+
+    #[test]
+    fn check_one_missing_lock_entry() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("jq"), b"stub").unwrap();
+
+        let lf = LockFile::default(); // no entries
+        let status = check_one("jq", &github_entry(None), &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::MissingLockEntry));
+    }
+
+    // ── check_one: VersionMismatch ────────────────────────────────────────────
+
+    #[test]
+    fn check_one_version_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("jq"), b"stub").unwrap();
+
+        let mut lf = LockFile::default();
+        lf.upsert(make_lock_entry("jq", "1.6.0", None));
+
+        let entry = github_entry(Some("1.7.0")); // pinned to different version
+        let status = check_one("jq", &entry, &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::VersionMismatch { .. }));
+    }
+
+    // ── check_one: ChecksumMismatch ───────────────────────────────────────────
+
+    #[test]
+    fn check_one_checksum_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("jq"), b"hello").unwrap();
+
+        let mut lf = LockFile::default();
+        lf.upsert(make_lock_entry("jq", "1.7.0", Some("deadbeef")));
+
+        let entry = github_entry(Some("1.7.0"));
+        let status = check_one("jq", &entry, &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::ChecksumMismatch { .. }));
+    }
+
+    // ── check_one: Ok ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn check_one_ok() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let content = b"hello";
+        std::fs::write(bin_dir.join("jq"), content).unwrap();
+
+        // Compute the real SHA256
+        let sha = crate::checksum::sha256_file(&bin_dir.join("jq")).unwrap();
+
+        let mut lf = LockFile::default();
+        lf.upsert(make_lock_entry("jq", "1.7.0", Some(&sha)));
+
+        let entry = github_entry(Some("1.7.0"));
+        let status = check_one("jq", &entry, &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::Ok));
+    }
+
+    // ── check_one: NoChecksumInLock ───────────────────────────────────────────
+
+    #[test]
+    fn check_one_no_checksum_in_lock() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("jq"), b"stub").unwrap();
+
+        let mut lf = LockFile::default();
+        lf.upsert(make_lock_entry("jq", "1.7.0", None)); // no sha256
+
+        let entry = github_entry(Some("1.7.0"));
+        let status = check_one("jq", &entry, &bin_dir, &lf).unwrap();
+        assert!(matches!(status, CheckStatus::NoChecksumInLock));
+    }
+
+    // ── run_check: end-to-end with temp project ───────────────────────────────
+
+    #[test]
+    fn run_check_empty_manifest_passes() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "[binaries]\n").unwrap();
+        let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(result.declared, 0);
+        assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn run_check_detects_missing_binary() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq", version = "1.7.1" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+        // No .bin/jq, no grip.lock
+        let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, "jq");
+    }
+
+    #[test]
+    fn run_check_tag_filter_skips_untagged() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq", version = "1.7.1" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+        // Filter by a tag that jq doesn't have — nothing examined, nothing failed
+        let result = run_check(Some("ci"), Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(result.examined, 0);
+        assert!(result.failed.is_empty());
+    }
+
+    #[test]
+    fn run_check_optional_entry_is_warned_not_failed() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+jq = { source = "github", repo = "jqlang/jq", version = "1.7.1", required = false }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+        let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
+        assert!(result.failed.is_empty());
+        assert_eq!(result.warned.len(), 1);
+    }
+
+    #[test]
+    fn run_check_shell_entry_without_version_accepts_any_lock_version() {
+        let tmp = TempDir::new().unwrap();
+        let toml = r#"
+[binaries]
+mytool = { source = "shell", install_cmd = "echo hi" }
+"#;
+        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
+
+        // Create .bin/mytool
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let content = b"stub";
+        std::fs::write(bin_dir.join("mytool"), content).unwrap();
+        let sha = crate::checksum::sha256_file(&bin_dir.join("mytool")).unwrap();
+
+        // Write grip.lock with matching sha
+        let lock_toml = format!(
+            r#"[[binary]]
+name = "mytool"
+version = "any"
+source = "shell"
+sha256 = "{sha}"
+installed_at = "2024-01-01T00:00:00Z"
+"#
+        );
+        std::fs::write(tmp.path().join("grip.lock"), lock_toml).unwrap();
+
+        let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
+        assert!(result.failed.is_empty());
+        assert_eq!(result.passed.len(), 1);
+    }
+}

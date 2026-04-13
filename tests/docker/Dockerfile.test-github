@@ -1,0 +1,40 @@
+# Integration test image for the GitHub release adapter.
+#
+# Based on the official Rust image (Debian Bookworm).
+# Requires outbound HTTPS to api.github.com and objects.githubusercontent.com.
+# The container runs as root (no sudo needed).
+#
+# Build & run (from the repository root):
+#   make test-integration-github
+
+FROM rust:slim-bookworm
+
+# System packages needed to compile grip.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Gate that tells integration tests they are running inside this container.
+ENV GRIP_INTEGRATION_TESTS=1
+
+WORKDIR /app
+
+# Layer 1: cache dependency compilation.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --tests 2>/dev/null || true && \
+    rm -rf src
+
+# Layer 2: copy real source and build the test binary.
+COPY src ./src
+COPY tests ./tests
+
+RUN cargo test --test integration_github --no-run
+
+# Run the ignored integration tests.
+CMD ["cargo", "test", "--test", "integration_github", "--", \
+     "--include-ignored", "--test-threads=1", "--nocapture"]

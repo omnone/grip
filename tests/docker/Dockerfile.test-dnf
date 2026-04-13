@@ -1,0 +1,51 @@
+# Integration test image for the DNF adapter.
+#
+# Based on Fedora so dnf is available.  Rust is installed via the official
+# rustup installer to keep the toolchain version consistent.
+# The container runs as root so dnf installs work without sudo.
+#
+# Build & run (from the repository root):
+#   make test-integration-dnf
+
+FROM fedora:40
+
+# System packages needed to compile grip and to run the Rust toolchain.
+RUN dnf install -y \
+        curl \
+        gcc \
+        openssl-devel \
+        pkg-config \
+        ca-certificates \
+    && dnf clean all
+
+# Install Rust via rustup (stable).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain stable && \
+    rustup show
+
+# Gate that tells integration tests they are running inside this container.
+ENV GRIP_INTEGRATION_TESTS=1
+
+WORKDIR /app
+
+# Layer 1: cache dependency compilation.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    cargo build --tests 2>/dev/null || true && \
+    rm -rf src
+
+# Layer 2: copy the real source and build the integration test binary.
+COPY src ./src
+COPY tests ./tests
+
+# Compile tests (also produces the `grip` binary referenced by CARGO_BIN_EXE_grip).
+RUN cargo test --test integration_dnf --no-run
+
+# Run the ignored integration tests.
+# --test-threads=1 avoids concurrent dnf invocations fighting over the rpm db lock.
+CMD ["cargo", "test", "--test", "integration_dnf", "--", \
+     "--include-ignored", "--test-threads=1", "--nocapture"]

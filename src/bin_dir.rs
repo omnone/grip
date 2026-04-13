@@ -60,3 +60,113 @@ pub fn make_executable(path: &Path) -> Result<(), GripError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ── ensure_bin_dir ────────────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_bin_dir_creates_directory() {
+        let tmp = TempDir::new().unwrap();
+        let bin = ensure_bin_dir(tmp.path()).unwrap();
+        assert_eq!(bin, tmp.path().join(".bin"));
+        assert!(bin.is_dir());
+    }
+
+    #[test]
+    fn ensure_bin_dir_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        ensure_bin_dir(tmp.path()).unwrap();
+        // Calling again must not fail
+        let bin = ensure_bin_dir(tmp.path()).unwrap();
+        assert!(bin.is_dir());
+    }
+
+    // ── copy_binary ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn copy_binary_places_file_in_bin_dir() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("mybinary");
+        std::fs::write(&src, b"ELF stub").unwrap();
+
+        let bin_dir = ensure_bin_dir(tmp.path()).unwrap();
+        let dest = copy_binary(&src, &bin_dir, "mybinary").unwrap();
+
+        assert!(dest.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ELF stub");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_binary_makes_file_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("mybinary");
+        std::fs::write(&src, b"#!/bin/sh\necho hi").unwrap();
+
+        let bin_dir = ensure_bin_dir(tmp.path()).unwrap();
+        let dest = copy_binary(&src, &bin_dir, "mybinary").unwrap();
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "file should have execute bits set");
+    }
+
+    // ── sha256_of_installed ───────────────────────────────────────────────────
+
+    #[test]
+    fn sha256_of_installed_returns_hash_for_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = ensure_bin_dir(tmp.path()).unwrap();
+        std::fs::write(bin_dir.join("tool"), b"hello").unwrap();
+
+        let hash = sha256_of_installed(&bin_dir, "tool");
+        assert!(hash.is_some());
+        // SHA256 of "hello"
+        assert_eq!(
+            hash.unwrap(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn sha256_of_installed_returns_none_for_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = ensure_bin_dir(tmp.path()).unwrap();
+        let hash = sha256_of_installed(&bin_dir, "nonexistent");
+        assert!(hash.is_none());
+    }
+
+    // ── make_executable ───────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn make_executable_sets_execute_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("script.sh");
+        std::fs::write(&file, b"#!/bin/sh").unwrap();
+        // Remove execute bits first
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        make_executable(&file).unwrap();
+
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0);
+    }
+
+    #[test]
+    fn make_executable_on_missing_file_returns_error() {
+        let result = make_executable(Path::new("/nonexistent/file"));
+        // On unix this is an Io error; on non-unix it's a no-op Ok.
+        #[cfg(unix)]
+        assert!(result.is_err());
+        #[cfg(not(unix))]
+        assert!(result.is_ok());
+    }
+}
