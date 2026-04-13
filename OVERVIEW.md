@@ -9,37 +9,52 @@
 ```
 binaries-manager/
 ├── src/
-│   ├── main.rs                    # Entry point and all command implementations (~1,396 lines)
+│   ├── main.rs                    # Entry point and all command implementations (1,398 lines)
 │   ├── cli.rs                     # Clap CLI definitions (158 lines)
-│   ├── installer.rs               # Core install orchestration (455 lines)
-│   ├── checker.rs                 # Verification logic (272 lines)
-│   ├── error.rs                   # GripError enum and formatting (113 lines)
-│   ├── output.rs                  # Terminal styling and ANSI colors (106 lines)
-│   ├── platform.rs                # OS/arch detection (69 lines)
+│   ├── installer.rs               # Core install orchestration (456 lines)
+│   ├── checker.rs                 # Verification logic (516 lines)
+│   ├── error.rs                   # GripError enum and formatting (211 lines)
+│   ├── output.rs                  # Terminal styling and ANSI colors (206 lines)
+│   ├── platform.rs                # OS/arch detection (140 lines)
 │   ├── privilege.rs               # Sudo/root detection (48 lines)
-│   ├── bin_dir.rs                 # .bin/ directory management (62 lines)
+│   ├── bin_dir.rs                 # .bin/ directory management (172 lines)
 │   ├── cache.rs                   # Download cache logic (188 lines)
-│   ├── checksum.rs                # SHA-256 verification (55 lines)
+│   ├── checksum.rs                # SHA-256 verification (127 lines)
 │   ├── adapters/
 │   │   ├── mod.rs                 # SourceAdapter trait definition (58 lines)
 │   │   ├── github.rs              # GitHub Releases adapter (382 lines)
 │   │   ├── url.rs                 # Direct URL downloader (191 lines)
 │   │   ├── apt.rs                 # APT package manager adapter (205 lines)
-│   │   ├── dnf.rs                 # DNF package manager adapter (205 lines)
+│   │   ├── dnf.rs                 # DNF package manager adapter (210 lines)
 │   │   └── shell.rs               # Shell command executor (76 lines)
 │   └── config/
 │       ├── mod.rs                 # Config module root
-│       ├── manifest.rs            # grip.toml TOML structs (241 lines)
-│       └── lockfile.rs            # grip.lock structs and I/O (92 lines)
+│       ├── manifest.rs            # grip.toml TOML structs (483 lines)
+│       └── lockfile.rs            # grip.lock structs and I/O (216 lines)
+├── tests/
+│   ├── integration_apt.rs         # APT adapter integration tests (272 lines)
+│   ├── integration_dnf.rs         # DNF adapter integration tests (272 lines)
+│   ├── integration_github.rs      # GitHub adapter integration tests (188 lines)
+│   ├── integration_url.rs         # URL adapter integration tests (159 lines)
+│   ├── integration_shell.rs       # Shell adapter integration tests (176 lines)
+│   └── docker/
+│       ├── Dockerfile.test-apt    # Debian Bookworm container for APT suite
+│       ├── Dockerfile.test-dnf    # Fedora 40 container for DNF suite
+│       ├── Dockerfile.test-github # Debian Bookworm container for GitHub suite
+│       ├── Dockerfile.test-url    # Debian Bookworm container for URL suite
+│       └── Dockerfile.test-shell  # Debian Bookworm container for Shell suite
 ├── Cargo.toml                     # Rust project metadata and dependencies
 ├── Cargo.lock                     # Locked Rust dependency versions
 ├── grip.toml                      # Example manifest
 ├── grip.lock                      # Example lock file
 ├── README.md                      # User documentation
-└── Makefile                       # Single `build` target (cargo build --release)
+├── OVERVIEW.md                    # This file — architecture reference
+├── CONTRIBUTING.md                # Contributor guide
+├── LICENSE                        # MIT
+└── Makefile                       # Build + integration test targets
 ```
 
-**Total: ~2,922 lines of Rust across 20 source files.**
+**Source: ~4,087 lines of Rust across 20 source files + 1,067 lines of integration tests across 5 test files.**
 
 ---
 
@@ -54,7 +69,7 @@ binaries-manager/
 | `adapters/mod.rs` | `SourceAdapter` async trait that all 5 adapters implement |
 | `adapters/github.rs` | Resolves semver ranges, downloads GitHub release assets, extracts archives |
 | `adapters/apt.rs` | Invokes APT with privilege escalation checks, symlinks binary into `.bin/` |
-| `adapters/dnf.rs` | Same as APT but for DNF/RPM systems |
+| `adapters/dnf.rs` | Same as APT but for DNF/RPM systems; uses PATH-search instead of `which` |
 | `adapters/url.rs` | HTTP downloads with optional SHA256 verification and caching |
 | `adapters/shell.rs` | Executes user-supplied shell commands (`install_cmd`) with `GRIP_BIN_DIR` set |
 | `config/manifest.rs` | TOML deserialization for all entry types (Github, Apt, Dnf, Url, Shell) |
@@ -99,8 +114,10 @@ read grip.toml
   → read grip.lock (or empty)
   → ensure .bin/ directory exists
   → for each entry: filter by platform + tag
-  → skip already-installed entries
-  → spawn async adapter tasks (FuturesUnordered)
+  → skip already-installed entries (lock entry present AND file on disk)
+  → split into two buckets:
+      system PM (apt/dnf)  → run sequentially to avoid pkg manager lock contention
+      downloads (github/url/shell) → run concurrently via FuturesUnordered
   → each adapter returns LockEntry { name, version, source, url, sha256, installed_at }
   → upsert entries into lock file
   → atomic write: tempfile + rename
@@ -145,16 +162,17 @@ User runs: grip sync / grip add / etc.
      4. Dispatch to adapter
          │
          ▼
-   ┌────────────┬──────────────┬──────────────┬───────────┐
-   │  GitHub    │   APT/DNF    │     URL      │   Shell   │
-   │ ─────────  │ ──────────── │ ──────────── │ ───────── │
-   │ Resolve    │ Check privs  │ Download     │ Execute   │
-   │ version    │ Update index │ Verify SHA   │ install   │
-   │ Find asset │ Run pkg mgr  │ Extract      │ command   │
-   │ Download   │ Symlink      │ Place binary │           │
-   │ Extract    │              │              │           │
-   │ Place      │              │              │           │
-   └────────────┴──────────────┴──────────────┴───────────┘
+   ┌─────────────────────────┬──────────────────────────────┐
+   │  Sequential (pkg mgr)   │   Concurrent (downloads)     │
+   │  APT / DNF              │   GitHub / URL / Shell        │
+   │ ──────────────────────  │ ──────────────────────────── │
+   │ Check privs             │ GitHub: resolve semver,       │
+   │ Update pkg index        │   find asset, download,       │
+   │ Run pkg manager         │   extract, place binary       │
+   │ Symlink to .bin/        │ URL: download, verify SHA,    │
+   │                         │   extract, place binary       │
+   │                         │ Shell: exec install_cmd       │
+   └─────────────────────────┴──────────────────────────────┘
          │
          ▼
    Collect LockEntry results
@@ -224,10 +242,33 @@ package = "openssl-devel"
 name = "ripgrep"
 version = "14.1.0"
 source = "apt"
-url = "https://..."
-sha256 = "abc123..."
+url = null
+sha256 = null
 installed_at = "2024-03-21T16:18:00Z"
+
+[[binary]]
+name = "jq"
+version = "1.7.1"
+source = "github"
+url = "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+sha256 = "e0165c9afcd6e81e86bf4f9... (sha256 hex)"
+installed_at = "2024-03-21T16:20:00Z"
 ```
+
+---
+
+## Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | `cargo build --release` |
+| `make test` | `cargo test` (unit tests, no Docker) |
+| `make test-integration-shell` | Shell adapter suite (no network) |
+| `make test-integration-apt` | APT adapter suite (Debian Bookworm container) |
+| `make test-integration-dnf` | DNF adapter suite (Fedora 40 container) |
+| `make test-integration-url` | URL adapter suite (network required) |
+| `make test-integration-github` | GitHub adapter suite (network required) |
+| `make test-integration` | All five suites sequentially |
 
 ---
 
@@ -260,11 +301,14 @@ installed_at = "2024-03-21T16:18:00Z"
 ### Adapter Pattern
 All install sources implement a single `SourceAdapter` async trait. Adding a new source (e.g., Homebrew) only requires implementing the trait — no changes to the dispatch logic.
 
-### Concurrent Installs
-Uses `FuturesUnordered` with `tokio` to run all adapter tasks concurrently, with `indicatif` multi-progress for live status without visual chaos.
+### Sequential vs. Concurrent Installs
+System package manager installs (APT, DNF) run **sequentially** to avoid concurrent writes to the system package database lock (`/var/lib/dpkg/lock`, `rpm.lock`). Download-based installs (GitHub, URL, Shell) run **concurrently** via `FuturesUnordered`.
 
 ### Fail-Fast Privilege Checks
 Checks for root/passwordless sudo upfront before any install, rather than silently hanging or prompting mid-run.
+
+### PATH-Based Binary Detection
+The DNF adapter and `installer.rs` discover binaries via direct PATH directory search rather than shelling out to `which`, which is not available in all container environments (e.g., minimal Fedora images).
 
 ### Atomicity
 Lock file writes use a tempfile + rename pattern to prevent corruption if the process crashes mid-write.
@@ -283,6 +327,22 @@ Downloads are keyed by SHA-256 of the URL string. Configurable via `$GRIP_CACHE_
 
 ### Error UX
 `GripError` enum has a `.hint()` method on every variant that provides actionable guidance (e.g., "Run `grip init` in your project directory").
+
+---
+
+## Test Suite
+
+grip has comprehensive integration tests covering all 5 adapters:
+
+| Suite | Container | Network | Tests |
+|-------|-----------|---------|-------|
+| `integration_shell` | Debian Bookworm | No | 7 |
+| `integration_apt` | Debian Bookworm | No (apt cache) | 11 |
+| `integration_dnf` | Fedora 40 | No (dnf cache) | 11 |
+| `integration_url` | Debian Bookworm | Yes | 6 |
+| `integration_github` | Debian Bookworm | Yes | 8 |
+
+Each suite runs inside a dedicated Docker container to ensure clean, reproducible test environments. Tests are gated by `GRIP_INTEGRATION_TESTS=1` and `#[ignore]` to prevent accidental execution on the host.
 
 ---
 
@@ -322,13 +382,3 @@ grip export --format dockerfile
 # Remove a tool
 grip remove ripgrep
 ```
-
----
-
-## Code Quality Notes
-
-- **Type safety**: `Result<T, GripError>` throughout; minimal panicking
-- **Async**: Proper `async/await` with `tokio`; no blocking calls on the async executor
-- **Error messages**: Rich, actionable hints per error variant
-- **No tests**: Validation is done via CLI usage (no unit/integration test files)
-- **Largest file**: `main.rs` at ~1,396 lines — mixes command routing with implementation; a candidate for future refactoring into per-command modules
