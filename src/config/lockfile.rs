@@ -29,6 +29,11 @@ pub struct LockEntry {
     pub sha256: Option<String>,
     /// UTC timestamp of when this entry was last written.
     pub installed_at: DateTime<Utc>,
+    /// Auto-detected on-PATH binary name (not persisted to lock file).
+    /// Set by apt/dnf adapters when the binary name differs from the entry name
+    /// and was discovered automatically via package file listing.
+    #[serde(skip)]
+    pub auto_binary: Option<String>,
 }
 
 impl LockFile {
@@ -105,6 +110,7 @@ mod tests {
             url: None,
             sha256: None,
             installed_at: Utc::now(),
+            auto_binary: None,
         }
     }
 
@@ -193,6 +199,7 @@ mod tests {
             url: Some("https://example.com/jq".to_string()),
             sha256: Some("abc123".to_string()),
             installed_at: Utc::now(),
+            auto_binary: None,
         });
         lf.save(&path).unwrap();
 

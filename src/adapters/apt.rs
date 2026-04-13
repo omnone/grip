@@ -86,16 +86,53 @@ impl SourceAdapter for AptAdapter {
             }
         }
 
-        let which = Command::new("which").arg(cmd_name).output()?;
-        if !which.status.success() {
+        let which_post = Command::new("which").arg(cmd_name).output()?;
+        let (target, auto_detected) = if which_post.status.success() {
+            let path_str = String::from_utf8_lossy(&which_post.stdout).trim().to_string();
+            (std::path::PathBuf::from(path_str), None)
+        } else if a.binary.is_none() {
+            // No explicit binary override — try to discover the executable from
+            // the package file list so the user doesn't have to set it manually.
+            let candidates = detect_package_executables(&a.package);
+            match candidates.as_slice() {
+                [single] => {
+                    let which_cand = Command::new("which").arg(single).output()?;
+                    if which_cand.status.success() {
+                        let path_str =
+                            String::from_utf8_lossy(&which_cand.stdout).trim().to_string();
+                        (std::path::PathBuf::from(path_str), Some(single.clone()))
+                    } else {
+                        return Err(GripError::CommandFailed(format!(
+                            "installed package `{}` but auto-detected binary `{single}` \
+                             is not on PATH",
+                            a.package
+                        )));
+                    }
+                }
+                [] => {
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         set `binary = \"...\"` in grip.toml if the executable uses another name",
+                        a.package
+                    )));
+                }
+                many => {
+                    let list = many.join(", ");
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         multiple executables found: {list}; \
+                         set `binary = \"...\"` in grip.toml to pick one",
+                        a.package
+                    )));
+                }
+            }
+        } else {
             return Err(GripError::CommandFailed(format!(
                 "installed package `{}` but `{cmd_name}` is not on PATH; \
                  set `binary = \"...\"` in grip.toml if the executable uses another name",
                 a.package
             )));
-        }
-        let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
-        let target = std::path::PathBuf::from(&path_str);
+        };
         symlink_binary(&target, bin_dir, name)?;
 
         let version = installed_version(&a.package).unwrap_or_else(|| "unknown".to_string());
@@ -110,6 +147,7 @@ impl SourceAdapter for AptAdapter {
             url: None,
             sha256: sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
+            auto_binary: auto_detected,
         })
     }
 }
@@ -165,7 +203,30 @@ pub async fn install_apt_library(
         url: None,
         sha256: None,
         installed_at: chrono::Utc::now(),
+        auto_binary: None,
     })
+}
+
+/// List executables installed by a package that live in a standard binary directory.
+/// Uses `dpkg -L` to query the package file list.
+fn detect_package_executables(package: &str) -> Vec<String> {
+    let Ok(out) = Command::new("dpkg").args(["-L", package]).output() else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
+    const BIN_DIRS: &[&str] = &["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/"];
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| BIN_DIRS.iter().any(|d| line.starts_with(d)))
+        .filter_map(|line| {
+            std::path::Path::new(line)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Run `apt-get` with the given args, using sudo if required by `priv_mode`.

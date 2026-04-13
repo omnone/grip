@@ -36,6 +36,9 @@ pub struct InstallResult {
     pub failed: Vec<(String, String)>,
     /// Optional binaries that failed to install, with their error messages.
     pub warned: Vec<(String, String)>,
+    /// Entries where the binary name was auto-detected and back-patched into grip.toml.
+    /// Each element is `(entry_name, detected_binary_name)`.
+    pub binary_overrides: Vec<(String, String)>,
 }
 
 /// Run a full install pass.
@@ -83,6 +86,7 @@ pub async fn run_install(
         skipped: vec![],
         failed: vec![],
         warned: vec![],
+        binary_overrides: vec![],
     };
 
     // Collect required flags before processing entries.
@@ -391,6 +395,24 @@ pub async fn run_install(
         lock.save(&lock_path)?;
     }
 
+    // Back-patch grip.toml with any auto-detected binary names so subsequent
+    // runs don't need to re-detect.
+    if !outcome.binary_overrides.is_empty() {
+        let mut manifest = Manifest::load(&manifest_path)?;
+        for (entry_name, detected_binary) in &outcome.binary_overrides {
+            match manifest.binaries.get_mut(entry_name) {
+                Some(crate::config::manifest::BinaryEntry::Dnf(d)) if d.binary.is_none() => {
+                    d.binary = Some(detected_binary.clone());
+                }
+                Some(crate::config::manifest::BinaryEntry::Apt(a)) if a.binary.is_none() => {
+                    a.binary = Some(detected_binary.clone());
+                }
+                _ => {}
+            }
+        }
+        manifest.save(&manifest_path)?;
+    }
+
     Ok(outcome)
 }
 
@@ -428,6 +450,9 @@ fn handle_install_result(
                     }
                     _ => {}
                 }
+            }
+            if let Some(detected) = lock_entry.auto_binary.clone() {
+                outcome.binary_overrides.push((name.clone(), detected));
             }
             outcome.installed.push(name);
             lock.upsert(lock_entry);

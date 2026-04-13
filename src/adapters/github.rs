@@ -175,6 +175,7 @@ impl SourceAdapter for GithubAdapter {
             url: Some(download_url),
             sha256: Some(sha256),
             installed_at: chrono::Utc::now(),
+            auto_binary: None,
         })
     }
 }

@@ -71,6 +71,7 @@ impl SourceAdapter for ShellAdapter {
             url: None,
             sha256: None,
             installed_at: chrono::Utc::now(),
+            auto_binary: None,
         })
     }
 }

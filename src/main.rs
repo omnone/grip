@@ -87,6 +87,13 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                     eprintln!("error: {name}: {err}");
                 }
             } else {
+                for (name, detected) in &result.binary_overrides {
+                    let check = output::success_checkmark(color_err);
+                    eprintln!(
+                        "  {check}  {name}: auto-detected binary `{detected}`; \
+                         updated grip.toml"
+                    );
+                }
                 for (name, err) in &result.warned {
                     let g = output::warn_glyph(color_err);
                     eprintln!("  {g}  {name}: {err}");
@@ -134,6 +141,13 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                     eprintln!("error: {name}: {err}");
                 }
             } else {
+                for (name, detected) in &result.binary_overrides {
+                    let check = output::success_checkmark(color_err);
+                    eprintln!(
+                        "  {check}  {name}: auto-detected binary `{detected}`; \
+                         updated grip.toml"
+                    );
+                }
                 for (name, err) in &result.warned {
                     let g = output::warn_glyph(color_err);
                     eprintln!("  {g}  {name}: {err}");

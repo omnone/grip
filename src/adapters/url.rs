@@ -110,6 +110,7 @@ impl SourceAdapter for UrlAdapter {
             url: Some(u.url.clone()),
             sha256: Some(sha256),
             installed_at: chrono::Utc::now(),
+            auto_binary: None,
         })
     }
 }

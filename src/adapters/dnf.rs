@@ -84,13 +84,47 @@ impl SourceAdapter for DnfAdapter {
             }
         }
 
-        let target = find_in_path(cmd_name).ok_or_else(|| {
-            GripError::CommandFailed(format!(
+        let (target, auto_detected) = if let Some(p) = find_in_path(cmd_name) {
+            (p, None)
+        } else if d.binary.is_none() {
+            // No explicit binary override set — try to discover the executable from
+            // the package file list so the user doesn't have to set it manually.
+            let candidates = detect_package_executables(&d.package);
+            match candidates.as_slice() {
+                [single] => {
+                    let p = find_in_path(single).ok_or_else(|| {
+                        GripError::CommandFailed(format!(
+                            "installed package `{}` but auto-detected binary `{single}` \
+                             is not on PATH",
+                            d.package
+                        ))
+                    })?;
+                    (p, Some(single.clone()))
+                }
+                [] => {
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         set `binary = \"...\"` in grip.toml if the executable uses another name",
+                        d.package
+                    )));
+                }
+                many => {
+                    let list = many.join(", ");
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         multiple executables found: {list}; \
+                         set `binary = \"...\"` in grip.toml to pick one",
+                        d.package
+                    )));
+                }
+            }
+        } else {
+            return Err(GripError::CommandFailed(format!(
                 "installed package `{}` but `{cmd_name}` is not on PATH; \
                  set `binary = \"...\"` in grip.toml if the executable uses another name",
                 d.package
-            ))
-        })?;
+            )));
+        };
         symlink_binary(&target, bin_dir, name)?;
 
         let version = installed_version(&d.package).unwrap_or_else(|| "unknown".to_string());
@@ -105,6 +139,7 @@ impl SourceAdapter for DnfAdapter {
             url: None,
             sha256: sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
+            auto_binary: auto_detected,
         })
     }
 }
@@ -158,6 +193,7 @@ pub async fn install_dnf_library(
         url: None,
         sha256: None,
         installed_at: chrono::Utc::now(),
+        auto_binary: None,
     })
 }
 
@@ -194,6 +230,28 @@ fn find_in_path(cmd: &str) -> Option<std::path::PathBuf> {
             .map(|dir| dir.join(cmd))
             .find(|p| p.is_file())
     })
+}
+
+/// List executables installed by a package that live in a standard binary directory.
+/// Uses `rpm -ql` to query the package file list.
+fn detect_package_executables(package: &str) -> Vec<String> {
+    let Ok(out) = Command::new("rpm").args(["-ql", package]).output() else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
+    const BIN_DIRS: &[&str] = &["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/"];
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| BIN_DIRS.iter().any(|d| line.starts_with(d)))
+        .filter_map(|line| {
+            std::path::Path::new(line)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Query the actual installed version via rpm.

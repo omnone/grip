@@ -317,6 +317,7 @@ mod tests {
             url: None,
             sha256: sha256.map(String::from),
             installed_at: Utc::now(),
+            auto_binary: None,
         }
     }
 
