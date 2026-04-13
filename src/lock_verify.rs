@@ -83,10 +83,9 @@ pub fn run_lock_verify(root: Option<PathBuf>) -> Result<VerifyResult, GripError>
         match verify_one(&entry.name, entry.sha256.as_deref(), &bin_dir) {
             VerifyStatus::Ok => out.verified.push(entry.name.clone()),
             VerifyStatus::NoChecksum => out.no_checksum.push(entry.name.clone()),
-            VerifyStatus::Missing => out.failed.push((
-                entry.name.clone(),
-                "binary missing from .bin/".to_string(),
-            )),
+            VerifyStatus::Missing => out
+                .failed
+                .push((entry.name.clone(), "binary missing from .bin/".to_string())),
             VerifyStatus::Mismatch { expected, got } => out.failed.push((
                 entry.name.clone(),
                 format!("checksum mismatch — lock: {expected}  disk: {got}"),
@@ -113,7 +112,9 @@ mod tests {
             url: None,
             sha256: sha256.map(String::from),
             installed_at: Utc::now(),
+            extra_binaries: vec![],
             auto_binary: None,
+            auto_extra_binaries: vec![],
         }
     }
 
@@ -176,8 +177,7 @@ mod tests {
         std::fs::write(bin_dir.join("jq"), b"modified binary").unwrap();
 
         // A sha256 that will never match the file content above
-        let wrong_sha =
-            "0000000000000000000000000000000000000000000000000000000000000000";
+        let wrong_sha = "0000000000000000000000000000000000000000000000000000000000000000";
         let mut lf = LockFile::default();
         lf.upsert(make_entry("jq", Some(wrong_sha)));
         lf.save(&tmp.path().join("grip.lock")).unwrap();
@@ -265,7 +265,10 @@ mod tests {
 
         let mut lf = LockFile::default();
         lf.upsert(make_entry("jq", Some(&sha_jq)));
-        lf.upsert(make_entry("rg", Some("badhash00000000000000000000000000000000000000000000000000000000")));
+        lf.upsert(make_entry(
+            "rg",
+            Some("badhash00000000000000000000000000000000000000000000000000000000"),
+        ));
         lf.upsert(make_entry("fd", None));
         lf.save(&tmp.path().join("grip.lock")).unwrap();
 

@@ -41,7 +41,9 @@ pub enum GripError {
     #[error("insufficient privileges: {hint}")]
     InsufficientPrivileges { hint: String },
     /// Shell install is blocked because `allow_shell` is not explicitly set to `true`.
-    #[error("shell install for '{name}' is blocked: `allow_shell` is not set to true in grip.toml")]
+    #[error(
+        "shell install for '{name}' is blocked: `allow_shell` is not set to true in grip.toml"
+    )]
     ShellNotAllowed { name: String },
     /// `gpg` binary was not found on PATH when signature verification was requested.
     #[error("gpg not found on PATH: install gpg to verify release signatures")]
@@ -171,7 +173,9 @@ mod tests {
 
     #[test]
     fn no_matching_asset_has_hint() {
-        assert!(GripError::NoMatchingAsset("*.tar.gz".into()).hint().is_some());
+        assert!(GripError::NoMatchingAsset("*.tar.gz".into())
+            .hint()
+            .is_some());
     }
 
     #[test]
@@ -181,7 +185,11 @@ mod tests {
 
     #[test]
     fn unsupported_platform_has_hint() {
-        assert!(GripError::UnsupportedPlatform { adapter: "apt".into() }.hint().is_some());
+        assert!(GripError::UnsupportedPlatform {
+            adapter: "apt".into()
+        }
+        .hint()
+        .is_some());
     }
 
     #[test]
@@ -191,7 +199,11 @@ mod tests {
 
     #[test]
     fn insufficient_privileges_has_hint() {
-        assert!(GripError::InsufficientPrivileges { hint: "run as root".into() }.hint().is_some());
+        assert!(GripError::InsufficientPrivileges {
+            hint: "run as root".into()
+        }
+        .hint()
+        .is_some());
     }
 
     #[test]
@@ -201,12 +213,18 @@ mod tests {
 
     #[test]
     fn shell_not_allowed_has_hint() {
-        assert!(GripError::ShellNotAllowed { name: "mytool".into() }.hint().is_some());
+        assert!(GripError::ShellNotAllowed {
+            name: "mytool".into()
+        }
+        .hint()
+        .is_some());
     }
 
     #[test]
     fn shell_not_allowed_message_contains_name() {
-        let err = GripError::ShellNotAllowed { name: "mytool".into() };
+        let err = GripError::ShellNotAllowed {
+            name: "mytool".into(),
+        };
         assert!(err.to_string().contains("mytool"));
     }
 
@@ -238,12 +256,18 @@ mod tests {
 
     #[test]
     fn unpinned_entries_has_hint() {
-        assert!(GripError::UnpinnedEntries { names: "jq, rg".into() }.hint().is_some());
+        assert!(GripError::UnpinnedEntries {
+            names: "jq, rg".into()
+        }
+        .hint()
+        .is_some());
     }
 
     #[test]
     fn unpinned_entries_message_contains_names() {
-        let err = GripError::UnpinnedEntries { names: "jq, rg".into() };
+        let err = GripError::UnpinnedEntries {
+            names: "jq, rg".into(),
+        };
         assert!(err.to_string().contains("jq"));
         assert!(err.to_string().contains("rg"));
     }

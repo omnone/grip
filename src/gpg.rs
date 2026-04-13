@@ -142,7 +142,13 @@ pub(crate) fn verify_signed_checksums_with_cmd(
     gpg_cmd: &str,
 ) -> Result<(), GripError> {
     // Step 1: verify GPG signature of the checksums file.
-    verify_gpg_signature_with_cmd(checksums_path, checksums_sig_path, fingerprint, name, gpg_cmd)?;
+    verify_gpg_signature_with_cmd(
+        checksums_path,
+        checksums_sig_path,
+        fingerprint,
+        name,
+        gpg_cmd,
+    )?;
 
     // Step 2: parse the checksums file for the expected hash.
     let content = std::fs::read_to_string(checksums_path).map_err(GripError::Io)?;

@@ -58,28 +58,42 @@ fn assert_success(out: &Output, context: &str) {
 #[test]
 #[ignore]
 fn shell_sync_installs_binary() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "1.0.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert!(project.path().join(".bin/hello").exists(), ".bin/hello not created");
-    assert!(project.path().join("grip.lock").exists(), "grip.lock missing");
+    assert!(
+        project.path().join(".bin/hello").exists(),
+        ".bin/hello not created"
+    );
+    assert!(
+        project.path().join("grip.lock").exists(),
+        "grip.lock missing"
+    );
 }
 
 /// `grip check` passes after a successful `grip sync`.
 #[test]
 #[ignore]
 fn shell_check_passes_after_sync() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "1.0.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
     assert_success(&grip(project.path(), &["check"]), "grip check");
@@ -89,34 +103,48 @@ hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", ve
 #[test]
 #[ignore]
 fn shell_list_shows_installed_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "1.0.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
 
     let out = grip(project.path(), &["list"]);
     assert_success(&out, "grip list");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("hello"), "expected 'hello' in grip list output, got: {stdout}");
+    assert!(
+        stdout.contains("hello"),
+        "expected 'hello' in grip list output, got: {stdout}"
+    );
 }
 
 /// Running `grip sync` twice is idempotent: the second call skips the already-installed entry.
 #[test]
 #[ignore]
 fn shell_sync_is_idempotent() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "1.0.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "first grip sync");
-    assert_success(&grip(project.path(), &["sync"]), "second grip sync (idempotent)");
+    assert_success(
+        &grip(project.path(), &["sync"]),
+        "second grip sync (idempotent)",
+    );
     assert!(project.path().join(".bin/hello").exists());
 }
 
@@ -124,53 +152,80 @@ hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", ve
 #[test]
 #[ignore]
 fn shell_remove_deletes_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "1.0.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
     assert!(project.path().join(".bin/hello").exists());
 
-    assert_success(&grip(project.path(), &["remove", "hello"]), "grip remove hello");
+    assert_success(
+        &grip(project.path(), &["remove", "hello"]),
+        "grip remove hello",
+    );
 
-    assert!(!project.path().join(".bin/hello").exists(), ".bin/hello still exists after remove");
+    assert!(
+        !project.path().join(".bin/hello").exists(),
+        ".bin/hello still exists after remove"
+    );
     let out = grip(project.path(), &["list"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("hello"), "hello still appears in grip list after remove");
+    assert!(
+        !stdout.contains("hello"),
+        "hello still appears in grip list after remove"
+    );
 }
 
 /// The `version` field recorded in the lock file matches what the manifest declares.
 #[test]
 #[ignore]
 fn shell_version_recorded_in_lockfile() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 hello = { source = "shell", install_cmd = "cp /bin/true $GRIP_BIN_DIR/hello", version = "2.5.0" }
-"#);
+"#,
+    );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
 
-    let lock = std::fs::read_to_string(project.path().join("grip.lock"))
-        .expect("grip.lock missing");
-    assert!(lock.contains("2.5.0"), "expected version '2.5.0' in grip.lock, got:\n{lock}");
+    let lock =
+        std::fs::read_to_string(project.path().join("grip.lock")).expect("grip.lock missing");
+    assert!(
+        lock.contains("2.5.0"),
+        "expected version '2.5.0' in grip.lock, got:\n{lock}"
+    );
 }
 
 /// A failing shell command that is marked `required = false` produces a warning, not a failure.
 #[test]
 #[ignore]
 fn shell_optional_failure_is_warning() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(r#"
+    let project = setup_project(
+        r#"
 [binaries]
 broken = { source = "shell", install_cmd = "exit 1", required = false }
-"#);
+"#,
+    );
 
-    assert_success(&grip(project.path(), &["sync"]), "grip sync with optional broken entry");
+    assert_success(
+        &grip(project.path(), &["sync"]),
+        "grip sync with optional broken entry",
+    );
     assert!(!project.path().join(".bin/broken").exists());
 }

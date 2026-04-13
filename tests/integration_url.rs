@@ -50,8 +50,7 @@ fn assert_success(out: &Output, context: &str) {
 }
 
 // Pinned jq 1.7.1 raw Linux amd64 binary.
-const JQ_URL: &str =
-    "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64";
+const JQ_URL: &str = "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64";
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -59,28 +58,42 @@ const JQ_URL: &str =
 #[test]
 #[ignore]
 fn url_sync_installs_binary() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}" }}
-"#));
+"#
+    ));
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert!(project.path().join(".bin/jq").exists(), ".bin/jq not created");
-    assert!(project.path().join("grip.lock").exists(), "grip.lock missing");
+    assert!(
+        project.path().join(".bin/jq").exists(),
+        ".bin/jq not created"
+    );
+    assert!(
+        project.path().join("grip.lock").exists(),
+        "grip.lock missing"
+    );
 }
 
 /// `grip check` passes after a successful `grip sync`.
 #[test]
 #[ignore]
 fn url_check_passes_after_sync() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}" }}
-"#));
+"#
+    ));
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
     assert_success(&grip(project.path(), &["check"]), "grip check");
@@ -90,34 +103,48 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
 #[test]
 #[ignore]
 fn url_list_shows_installed_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}" }}
-"#));
+"#
+    ));
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
 
     let out = grip(project.path(), &["list"]);
     assert_success(&out, "grip list");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("jq"), "expected 'jq' in grip list output, got: {stdout}");
+    assert!(
+        stdout.contains("jq"),
+        "expected 'jq' in grip list output, got: {stdout}"
+    );
 }
 
 /// Running `grip sync` twice is idempotent.
 #[test]
 #[ignore]
 fn url_sync_is_idempotent() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}" }}
-"#));
+"#
+    ));
 
     assert_success(&grip(project.path(), &["sync"]), "first grip sync");
-    assert_success(&grip(project.path(), &["sync"]), "second grip sync (idempotent)");
+    assert_success(
+        &grip(project.path(), &["sync"]),
+        "second grip sync (idempotent)",
+    );
     assert!(project.path().join(".bin/jq").exists());
 }
 
@@ -125,35 +152,52 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
 #[test]
 #[ignore]
 fn url_sync_bad_checksum_fails() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }}
-"#));
+"#
+    ));
 
     let out = grip(project.path(), &["sync"]);
-    assert!(!out.status.success(), "expected sync to fail with wrong sha256, but it succeeded");
+    assert!(
+        !out.status.success(),
+        "expected sync to fail with wrong sha256, but it succeeded"
+    );
 }
 
 /// `grip remove` deletes the binary and the lock file entry.
 #[test]
 #[ignore]
 fn url_remove_deletes_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
-    let project = setup_project(&format!(r#"
+    let project = setup_project(&format!(
+        r#"
 [binaries]
 jq = {{ source = "url", url = "{JQ_URL}" }}
-"#));
+"#
+    ));
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
     assert!(project.path().join(".bin/jq").exists());
 
     assert_success(&grip(project.path(), &["remove", "jq"]), "grip remove jq");
 
-    assert!(!project.path().join(".bin/jq").exists(), ".bin/jq still exists after remove");
+    assert!(
+        !project.path().join(".bin/jq").exists(),
+        ".bin/jq still exists after remove"
+    );
     let out = grip(project.path(), &["list"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("jq"), "jq still appears in grip list after remove");
+    assert!(
+        !stdout.contains("jq"),
+        "jq still appears in grip list after remove"
+    );
 }

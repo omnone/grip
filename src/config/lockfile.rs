@@ -1,9 +1,9 @@
 //! `grip.lock` lock file types and I/O.
 
+use crate::error::GripError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::error::GripError;
 
 /// The top-level `grip.lock` document — a list of installed binary and library records.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -29,11 +29,19 @@ pub struct LockEntry {
     pub sha256: Option<String>,
     /// UTC timestamp of when this entry was last written.
     pub installed_at: DateTime<Utc>,
+    /// Additional binary names installed alongside the primary binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_binaries: Vec<String>,
     /// Auto-detected on-PATH binary name (not persisted to lock file).
     /// Set by apt/dnf adapters when the binary name differs from the entry name
     /// and was discovered automatically via package file listing.
     #[serde(skip)]
     pub auto_binary: Option<String>,
+    /// Auto-detected extra binary names (not persisted to lock file).
+    /// Set by apt/dnf adapters when extra binaries were discovered automatically
+    /// from the package file list and `extra_binaries` was not manually set.
+    #[serde(skip)]
+    pub auto_extra_binaries: Vec<String>,
 }
 
 impl LockFile {
@@ -88,7 +96,11 @@ impl LockFile {
 
     /// Insert or replace a library lock entry with the same name.
     pub fn upsert_library(&mut self, entry: LockEntry) {
-        if let Some(existing) = self.library_entries.iter_mut().find(|e| e.name == entry.name) {
+        if let Some(existing) = self
+            .library_entries
+            .iter_mut()
+            .find(|e| e.name == entry.name)
+        {
             *existing = entry;
         } else {
             self.library_entries.push(entry);
@@ -110,7 +122,9 @@ mod tests {
             url: None,
             sha256: None,
             installed_at: Utc::now(),
+            extra_binaries: vec![],
             auto_binary: None,
+            auto_extra_binaries: vec![],
         }
     }
 
@@ -199,7 +213,9 @@ mod tests {
             url: Some("https://example.com/jq".to_string()),
             sha256: Some("abc123".to_string()),
             installed_at: Utc::now(),
+            extra_binaries: vec![],
             auto_binary: None,
+            auto_extra_binaries: vec![],
         });
         lf.save(&path).unwrap();
 

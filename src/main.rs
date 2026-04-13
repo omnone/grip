@@ -5,13 +5,13 @@ mod bin_dir;
 mod cache;
 mod checker;
 mod checksum;
+mod cli;
 mod config;
 mod error;
 mod gpg;
 mod installer;
 mod lock_verify;
 mod output;
-mod cli;
 mod platform;
 mod privilege;
 
@@ -21,14 +21,14 @@ use std::time::Duration;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
 use cli::{CacheAction, Cli, Commands, LockAction};
-use config::manifest::{
-    find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry,
-    LibDnfEntry, LibraryEntry, Manifest, ShellEntry, UrlEntry,
-};
 use config::lockfile::LockFile;
+use config::manifest::{
+    find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry, LibDnfEntry,
+    LibraryEntry, Manifest, ShellEntry, UrlEntry,
+};
 use error::GripError;
+use indicatif::{ProgressBar, ProgressStyle};
 use output::OutputCfg;
 
 #[tokio::main]
@@ -100,8 +100,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 require_pins: false,
             };
             let start = std::time::Instant::now();
-            let result =
-                installer::run_install(false, false, None, root_for_sync, ui).await?;
+            let result = installer::run_install(false, false, None, root_for_sync, ui).await?;
             let elapsed = start.elapsed().as_secs_f64();
             if cfg.quiet {
                 for (name, err) in &result.failed {
@@ -112,6 +111,14 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                     let check = output::success_checkmark(color_err);
                     eprintln!(
                         "  {check}  {name}: auto-detected binary `{detected}`; \
+                         updated grip.toml"
+                    );
+                }
+                for (name, extras) in &result.extra_binary_overrides {
+                    let check = output::success_checkmark(color_err);
+                    let list = extras.join(", ");
+                    eprintln!(
+                        "  {check}  {name}: auto-detected extra binaries [{list}]; \
                          updated grip.toml"
                     );
                 }
@@ -132,7 +139,10 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 } else {
                     let mut parts: Vec<String> = Vec::new();
                     if n_installed > 0 {
-                        parts.push(output::green(color_out, &format!("{n_installed} installed")));
+                        parts.push(output::green(
+                            color_out,
+                            &format!("{n_installed} installed"),
+                        ));
                     }
                     if n_skipped > 0 {
                         parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
@@ -147,7 +157,13 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 std::process::exit(1);
             }
         }
-        Commands::Sync { locked, verify, tag, yes, require_pins } => {
+        Commands::Sync {
+            locked,
+            verify,
+            tag,
+            yes,
+            require_pins,
+        } => {
             let start = std::time::Instant::now();
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
@@ -155,8 +171,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 yes,
                 require_pins,
             };
-            let result =
-                installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
+            let result = installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
             let elapsed = start.elapsed().as_secs_f64();
 
             if cfg.quiet {
@@ -168,6 +183,14 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                     let check = output::success_checkmark(color_err);
                     eprintln!(
                         "  {check}  {name}: auto-detected binary `{detected}`; \
+                         updated grip.toml"
+                    );
+                }
+                for (name, extras) in &result.extra_binary_overrides {
+                    let check = output::success_checkmark(color_err);
+                    let list = extras.join(", ");
+                    eprintln!(
+                        "  {check}  {name}: auto-detected extra binaries [{list}]; \
                          updated grip.toml"
                     );
                 }
@@ -196,16 +219,10 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                         ));
                     }
                     if n_skipped > 0 {
-                        parts.push(output::dim(
-                            color_out,
-                            &format!("{n_skipped} skipped"),
-                        ));
+                        parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
                     }
                     if n_failed > 0 {
-                        parts.push(output::red(
-                            color_out,
-                            &format!("{n_failed} failed"),
-                        ));
+                        parts.push(output::red(color_out, &format!("{n_failed} failed")));
                     }
                     println!("\n  {}  ({elapsed:.1}s)", parts.join(", "));
                 }
@@ -390,7 +407,10 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
     if !cfg.quiet {
         println!(
             "hint: {}",
-            output::dim(color, "Run `grip add <name>` then `grip sync` to populate .bin/.")
+            output::dim(
+                color,
+                "Run `grip add <name>` then `grip sync` to populate .bin/."
+            )
         );
     }
 
@@ -530,12 +550,14 @@ fn cmd_add(
         "apt" => BinaryEntry::Apt(AptEntry {
             package: package.unwrap_or_else(|| binary_name.clone()),
             binary,
+            extra_binaries: None,
             version,
             meta: Default::default(),
         }),
         "dnf" => BinaryEntry::Dnf(DnfEntry {
             package: package.unwrap_or_else(|| binary_name.clone()),
             binary,
+            extra_binaries: None,
             version,
             meta: Default::default(),
         }),
@@ -546,6 +568,7 @@ fn cmd_add(
             version,
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint,
             sig_asset_pattern,
             checksums_asset_pattern,
@@ -554,6 +577,7 @@ fn cmd_add(
         "url" => BinaryEntry::Url(UrlEntry {
             url: url.ok_or_else(|| GripError::Other("--url required for url source".into()))?,
             binary: None,
+            extra_binaries: None,
             sha256: None,
             gpg_fingerprint,
             sig_url,
@@ -571,6 +595,7 @@ fn cmd_add(
             })?,
             version,
             allow_shell,
+            extra_binaries: None,
             meta: Default::default(),
         }),
         other => return Err(GripError::UnknownAdapter(other.to_string())),
@@ -627,15 +652,34 @@ fn cmd_remove(
             )));
         }
         manifest.binaries.shift_remove(&name);
+
+        // Collect extra binaries before removing the lock entry.
+        let extra_binaries: Vec<String> = lock
+            .get(&name)
+            .map(|e| e.extra_binaries.clone())
+            .unwrap_or_default();
+
         lock.remove(&name);
 
-        // Remove the symlink / binary from .bin/ if present.
+        // Remove the primary symlink / binary from .bin/ if present.
         let bin_path = bin_dir.join(&name);
         if bin_path.exists() || bin_path.symlink_metadata().is_ok() {
             std::fs::remove_file(&bin_path)?;
             if !cfg.quiet {
                 let check = output::success_checkmark(color);
                 println!("  {check}  removed .bin/{name}");
+            }
+        }
+
+        // Remove any extra binary symlinks recorded in the lock entry.
+        for extra in &extra_binaries {
+            let extra_path = bin_dir.join(extra);
+            if extra_path.exists() || extra_path.symlink_metadata().is_ok() {
+                std::fs::remove_file(&extra_path)?;
+                if !cfg.quiet {
+                    let check = output::success_checkmark(color);
+                    println!("  {check}  removed .bin/{extra}");
+                }
             }
         }
     }
@@ -818,7 +862,10 @@ fn cmd_list(root: Option<std::path::PathBuf>, all: bool, cfg: &OutputCfg) -> Res
             println!("No binaries or libraries installed yet.");
             println!(
                 "hint: {}",
-                output::dim(color, "Run `grip sync` to install everything from grip.toml.")
+                output::dim(
+                    color,
+                    "Run `grip sync` to install everything from grip.toml."
+                )
             );
         }
         return Ok(());
@@ -944,7 +991,12 @@ async fn cmd_outdated(
     }
 
     // Column widths.
-    let name_w = entries.iter().map(|(n, _)| n.len()).max().unwrap_or(6).max(6);
+    let name_w = entries
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
     let col_w = 14usize;
 
     if !cfg.quiet {
@@ -952,7 +1004,10 @@ async fn cmd_outdated(
             "  {:<name_w$}  {:<col_w$}  {:<col_w$}  STATUS",
             "BINARY", "INSTALLED", "LATEST",
         );
-        println!("  {}", output::dim(color, &"─".repeat(name_w + col_w * 2 + 16)));
+        println!(
+            "  {}",
+            output::dim(color, &"─".repeat(name_w + col_w * 2 + 16))
+        );
 
         let mut n_outdated = 0usize;
         let mut n_current = 0usize;
@@ -1036,7 +1091,10 @@ async fn cmd_outdated(
                 "  {:<name_w$}  {:<col_w$}  {:<col_w$}  STATUS",
                 "LIBRARY", "LOCKED", "SYSTEM",
             );
-            println!("  {}", output::dim(color, &"─".repeat(name_w + col_w * 2 + 16)));
+            println!(
+                "  {}",
+                output::dim(color, &"─".repeat(name_w + col_w * 2 + 16))
+            );
 
             for (name, entry) in &lib_entries {
                 let locked_ver = lock
@@ -1431,7 +1489,10 @@ async fn cmd_update_one(
         };
         if !cfg.quiet {
             let check = output::success_checkmark(color_err);
-            println!("\n  {check}  updated library {name} to {}", lock_entry.version);
+            println!(
+                "\n  {check}  updated library {name} to {}",
+                lock_entry.version
+            );
         }
         lock.upsert_library(lock_entry);
         lock.save(&lock_path)?;
@@ -1467,10 +1528,7 @@ async fn cmd_update_one(
     Ok(())
 }
 
-async fn cmd_update_all(
-    project_root: &std::path::Path,
-    cfg: &OutputCfg,
-) -> Result<(), GripError> {
+async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Result<(), GripError> {
     let manifest_path = project_root.join("grip.toml");
     let lock_path = project_root.join("grip.lock");
     let bin_dir = crate::bin_dir::ensure_bin_dir(project_root)?;
@@ -1527,7 +1585,9 @@ async fn cmd_update_all(
             };
             async move {
                 let adapter = crate::adapters::get_adapter(&entry, cache);
-                let result = adapter.install(&name, &entry, &bin_dir, &client, pb, color_err).await;
+                let result = adapter
+                    .install(&name, &entry, &bin_dir, &client, pb, color_err)
+                    .await;
                 (name, result)
             }
         })
@@ -1606,10 +1666,7 @@ async fn cmd_update_all(
         let n_ok = updated.len();
         let n_fail = failed.len();
         if n_fail == 0 {
-            println!(
-                "  {}",
-                output::green(color_out, &format!("{n_ok} updated"))
-            );
+            println!("  {}", output::green(color_out, &format!("{n_ok} updated")));
         } else {
             let mut parts = Vec::new();
             if n_ok > 0 {
@@ -1669,7 +1726,11 @@ fn cmd_cache(action: CacheAction, cfg: &OutputCfg) -> Result<(), GripError> {
     Ok(())
 }
 
-fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), GripError> {
+fn cmd_export(
+    format: &str,
+    root: Option<std::path::PathBuf>,
+    cfg: &OutputCfg,
+) -> Result<(), GripError> {
     let project_root = match root {
         Some(r) => r,
         None => {
@@ -1690,7 +1751,8 @@ fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -
     for (name, entry) in &manifest.binaries {
         match entry {
             BinaryEntry::Apt(a) => {
-                let ver = lock.get(name)
+                let ver = lock
+                    .get(name)
                     .map(|le| le.version.clone())
                     .or_else(|| a.version.clone());
                 let spec = match ver {
@@ -1700,7 +1762,8 @@ fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -
                 apt_pkgs.push(spec);
             }
             BinaryEntry::Dnf(d) => {
-                let ver = lock.get(name)
+                let ver = lock
+                    .get(name)
                     .map(|le| le.version.clone())
                     .or_else(|| d.version.clone());
                 let spec = match ver {
@@ -1710,11 +1773,15 @@ fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -
                 dnf_pkgs.push(spec);
             }
             BinaryEntry::Github(g) => {
-                let url = lock.get(name)
+                let url = lock
+                    .get(name)
                     .and_then(|le| le.url.clone())
                     .unwrap_or_else(|| {
                         let ver = g.version.as_deref().unwrap_or("latest");
-                        format!("https://github.com/{}/releases/download/v{}/{}", g.repo, ver, name)
+                        format!(
+                            "https://github.com/{}/releases/download/v{}/{}",
+                            g.repo, ver, name
+                        )
                     });
                 curl_installs.push((name.clone(), url));
             }
@@ -1730,7 +1797,8 @@ fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -
     for (name, entry) in &manifest.libraries {
         match entry {
             LibraryEntry::Apt(a) => {
-                let ver = lock.get_library(name)
+                let ver = lock
+                    .get_library(name)
                     .map(|le| le.version.clone())
                     .or_else(|| a.version.clone());
                 let spec = match ver {
@@ -1740,7 +1808,8 @@ fn cmd_export(format: &str, root: Option<std::path::PathBuf>, cfg: &OutputCfg) -
                 apt_pkgs.push(spec);
             }
             LibraryEntry::Dnf(d) => {
-                let ver = lock.get_library(name)
+                let ver = lock
+                    .get_library(name)
                     .map(|le| le.version.clone())
                     .or_else(|| d.version.clone());
                 let spec = match ver {
@@ -1890,20 +1959,20 @@ mod tests {
         let result = cmd_add(
             "mytool".into(),
             Some("shell".into()),
-            None,   // version
-            None,   // repo
-            None,   // url
-            None,   // package
-            None,   // binary
-            false,  // library
-            None,   // cmd ← intentionally omitted
-            false,  // allow_shell
-            None,   // gpg_fingerprint
-            None,   // sig_asset_pattern
-            None,   // checksums_asset_pattern
-            None,   // sig_url
-            None,   // signed_checksums_url
-            None,   // checksums_sig_url
+            None,  // version
+            None,  // repo
+            None,  // url
+            None,  // package
+            None,  // binary
+            false, // library
+            None,  // cmd ← intentionally omitted
+            false, // allow_shell
+            None,  // gpg_fingerprint
+            None,  // sig_asset_pattern
+            None,  // checksums_asset_pattern
+            None,  // sig_url
+            None,  // signed_checksums_url
+            None,  // checksums_sig_url
             Some(tmp.path().to_path_buf()),
             &silent_cfg(),
         );
@@ -1928,13 +1997,13 @@ mod tests {
             None,
             false,
             Some("echo install > $GRIP_BIN_DIR/mytool".into()), // cmd ← provided
-            false,  // allow_shell
-            None,   // gpg_fingerprint
-            None,   // sig_asset_pattern
-            None,   // checksums_asset_pattern
-            None,   // sig_url
-            None,   // signed_checksums_url
-            None,   // checksums_sig_url
+            false,                                              // allow_shell
+            None,                                               // gpg_fingerprint
+            None,                                               // sig_asset_pattern
+            None,                                               // checksums_asset_pattern
+            None,                                               // sig_url
+            None,                                               // signed_checksums_url
+            None,                                               // checksums_sig_url
             Some(tmp.path().to_path_buf()),
             &silent_cfg(),
         );
@@ -1944,7 +2013,10 @@ mod tests {
         assert!(manifest_path.exists(), "grip.toml should have been created");
 
         let manifest = config::manifest::Manifest::load(&manifest_path).unwrap();
-        let entry = manifest.binaries.get("mytool").expect("mytool should be in [binaries]");
+        let entry = manifest
+            .binaries
+            .get("mytool")
+            .expect("mytool should be in [binaries]");
         if let config::manifest::BinaryEntry::Shell(s) = entry {
             assert_eq!(s.install_cmd, "echo install > $GRIP_BIN_DIR/mytool");
             assert_eq!(s.version.as_deref(), Some("1.0.0"));
@@ -1967,13 +2039,13 @@ mod tests {
             None,
             false,
             Some("echo hi".into()),
-            true,   // allow_shell = true
-            None,   // gpg_fingerprint
-            None,   // sig_asset_pattern
-            None,   // checksums_asset_pattern
-            None,   // sig_url
-            None,   // signed_checksums_url
-            None,   // checksums_sig_url
+            true, // allow_shell = true
+            None, // gpg_fingerprint
+            None, // sig_asset_pattern
+            None, // checksums_asset_pattern
+            None, // sig_url
+            None, // signed_checksums_url
+            None, // checksums_sig_url
             Some(tmp.path().to_path_buf()),
             &silent_cfg(),
         );
@@ -1981,10 +2053,72 @@ mod tests {
         let manifest = config::manifest::Manifest::load(&tmp.path().join("grip.toml")).unwrap();
         let entry = manifest.binaries.get("mytool").unwrap();
         if let config::manifest::BinaryEntry::Shell(s) = entry {
-            assert!(s.allow_shell, "allow_shell should be true when --allow-shell is passed");
+            assert!(
+                s.allow_shell,
+                "allow_shell should be true when --allow-shell is passed"
+            );
         } else {
             panic!("expected a Shell entry");
         }
+    }
+
+    // ── cmd_remove ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cmd_remove_also_removes_extra_binaries() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Minimal grip.toml with one dnf entry.
+        std::fs::write(
+            root.join("grip.toml"),
+            r#"[binaries]
+chromium = { source = "dnf", package = "chromium-browser" }
+"#,
+        )
+        .unwrap();
+
+        // grip.lock with extra_binaries recorded.
+        std::fs::write(
+            root.join("grip.lock"),
+            r#"[[binary]]
+name = "chromium"
+version = "1.0.0"
+source = "dnf"
+sha256 = "aabbcc"
+installed_at = "2026-01-01T00:00:00Z"
+extra_binaries = ["chromium-browser", "chromedriver"]
+"#,
+        )
+        .unwrap();
+
+        // Create the .bin/ directory with fake symlinks.
+        let bin_dir = root.join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        for name in &["chromium", "chromium-browser", "chromedriver"] {
+            std::fs::write(bin_dir.join(name), "fake").unwrap();
+        }
+
+        cmd_remove(
+            "chromium".into(),
+            false,
+            Some(root.to_path_buf()),
+            &silent_cfg(),
+        )
+        .unwrap();
+
+        assert!(
+            !bin_dir.join("chromium").exists(),
+            "primary binary should be removed"
+        );
+        assert!(
+            !bin_dir.join("chromium-browser").exists(),
+            "extra binary chromium-browser should be removed"
+        );
+        assert!(
+            !bin_dir.join("chromedriver").exists(),
+            "extra binary chromedriver should be removed"
+        );
     }
 
     // ── format_bytes ──────────────────────────────────────────────────────────

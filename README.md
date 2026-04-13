@@ -148,6 +148,11 @@ source  = "apt"           # or "dnf" on RPM-based systems
 package = "ripgrep"
 binary  = "rg"            # on-PATH command differs from the package name
 
+[binaries.ffmpeg]
+source          = "apt"
+package         = "ffmpeg"
+extra_binaries  = ["ffprobe", "ffplay"]  # additional binaries installed by the same package
+
 [binaries.mytool]
 source      = "shell"
 install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"

@@ -1,9 +1,9 @@
 //! `grip.toml` manifest types and loading/saving logic.
 
+use crate::error::GripError;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use crate::error::GripError;
 
 /// The top-level `grip.toml` document.
 #[derive(Debug, Deserialize, Serialize)]
@@ -73,6 +73,9 @@ pub struct DnfEntry {
     /// On-PATH command name when it differs from the manifest key (e.g. package `ripgrep` → `rg`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// Additional binaries installed by the same package (e.g. `ffprobe`, `ffplay` for `ffmpeg`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_binaries: Option<Vec<String>>,
     pub version: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
@@ -85,6 +88,9 @@ pub struct AptEntry {
     /// On-PATH command name when it differs from the manifest key (e.g. `fd-find` → `fd`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// Additional binaries installed by the same package (e.g. `ffprobe`, `ffplay` for `ffmpeg`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_binaries: Option<Vec<String>>,
     pub version: Option<String>,
     #[serde(flatten)]
     pub meta: CommonMeta,
@@ -101,6 +107,9 @@ pub struct GithubEntry {
     pub asset_pattern: Option<String>,
     /// Name of the binary inside the archive when it differs from the entry name.
     pub binary: Option<String>,
+    /// Additional binary names to extract from the same archive (e.g. `ffprobe`, `ffplay`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_binaries: Option<Vec<String>>,
     /// GPG key fingerprint (or long key ID) used to verify the release signature.
     /// When set, grip downloads the detached signature asset and verifies it against
     /// this fingerprint using the system `gpg` binary. Hard error on mismatch.
@@ -128,6 +137,9 @@ pub struct UrlEntry {
     pub url: String,
     /// Name of the binary inside the archive when it differs from the entry name.
     pub binary: Option<String>,
+    /// Additional binary names to extract from the same archive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_binaries: Option<Vec<String>>,
     /// Expected SHA-256 hex digest for download verification.
     pub sha256: Option<String>,
     /// GPG key fingerprint (or long key ID) used to verify the downloaded file.
@@ -166,6 +178,9 @@ pub struct ShellEntry {
     /// surfaces a clear error pointing to this field.
     #[serde(default)]
     pub allow_shell: bool,
+    /// Additional binary names placed in `.bin/` by the install script.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_binaries: Option<Vec<String>>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -205,6 +220,17 @@ impl BinaryEntry {
             BinaryEntry::Github(e) => &e.meta,
             BinaryEntry::Url(e) => &e.meta,
             BinaryEntry::Shell(e) => &e.meta,
+        }
+    }
+
+    /// Return the declared extra binary names, or an empty slice when none are set.
+    pub fn extra_binaries(&self) -> &[String] {
+        match self {
+            BinaryEntry::Apt(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
+            BinaryEntry::Dnf(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
+            BinaryEntry::Github(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
+            BinaryEntry::Url(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
+            BinaryEntry::Shell(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
         }
     }
 
@@ -409,6 +435,7 @@ mod tests {
                 version: Some("14.0.0".to_string()),
                 asset_pattern: None,
                 binary: None,
+                extra_binaries: None,
                 gpg_fingerprint: None,
                 sig_asset_pattern: None,
                 checksums_asset_pattern: None,
@@ -445,6 +472,7 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -463,6 +491,7 @@ mod tests {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
             binary: None,
+            extra_binaries: None,
             version: None,
             meta: CommonMeta::default(),
         });
@@ -479,6 +508,7 @@ mod tests {
         let entry = BinaryEntry::Dnf(DnfEntry {
             package: "jq".to_string(),
             binary: None,
+            extra_binaries: None,
             version: None,
             meta: CommonMeta::default(),
         });
@@ -496,6 +526,7 @@ mod tests {
             install_cmd: "echo hi".to_string(),
             version: None,
             allow_shell: false,
+            extra_binaries: None,
             meta: CommonMeta::default(),
         });
         let pinned = entry.pin_version("0.1.0");
@@ -521,6 +552,7 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -548,6 +580,7 @@ mod tests {
             version: Some("1.7.1".to_string()),
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -563,6 +596,7 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -576,6 +610,7 @@ mod tests {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
             binary: None,
+            extra_binaries: None,
             version: Some("1.6".to_string()),
             meta: CommonMeta::default(),
         });
@@ -587,6 +622,7 @@ mod tests {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
             binary: None,
+            extra_binaries: None,
             version: None,
             meta: CommonMeta::default(),
         });
@@ -598,6 +634,7 @@ mod tests {
         let entry = BinaryEntry::Url(UrlEntry {
             url: "https://example.com/tool-1.0.tar.gz".to_string(),
             binary: None,
+            extra_binaries: None,
             sha256: None,
             gpg_fingerprint: None,
             sig_url: None,
@@ -614,6 +651,7 @@ mod tests {
             install_cmd: "echo hi".to_string(),
             version: Some("2.0".to_string()),
             allow_shell: true,
+            extra_binaries: None,
             meta: CommonMeta::default(),
         });
         assert!(entry.is_version_pinned());
@@ -625,6 +663,7 @@ mod tests {
             install_cmd: "curl ... | sh".to_string(),
             version: None,
             allow_shell: true,
+            extra_binaries: None,
             meta: CommonMeta::default(),
         });
         assert!(!entry.is_version_pinned());
@@ -639,6 +678,7 @@ mod tests {
             version: None,
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -649,6 +689,7 @@ mod tests {
         let apt = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
             binary: None,
+            extra_binaries: None,
             version: None,
             meta: CommonMeta::default(),
         });

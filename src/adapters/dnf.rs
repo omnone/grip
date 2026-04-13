@@ -32,7 +32,11 @@ impl SourceAdapter for DnfAdapter {
         self.platform.is_linux() && which_exists("dnf")
     }
 
-    async fn resolve_latest(&self, entry: &BinaryEntry, _client: &Client) -> Result<String, GripError> {
+    async fn resolve_latest(
+        &self,
+        entry: &BinaryEntry,
+        _client: &Client,
+    ) -> Result<String, GripError> {
         let BinaryEntry::Dnf(d) = entry else {
             return Err(GripError::Other("expected dnf entry".into()));
         };
@@ -133,7 +137,36 @@ impl SourceAdapter for DnfAdapter {
         };
         symlink_binary(&target, bin_dir, name)?;
 
-        let version = installed_version(&d.package).unwrap_or_else(|| "unknown".to_string());
+        let primary_cmd = cmd_name;
+        let mut extra_symlinked: Vec<String> = Vec::new();
+        let mut auto_detected_extras: Vec<String> = Vec::new();
+
+        if let Some(extras) = &d.extra_binaries {
+            // Manually declared extras — symlink each.
+            for extra in extras {
+                if let Some(p) = find_in_path(extra) {
+                    symlink_binary(&p, bin_dir, extra)?;
+                    extra_symlinked.push(extra.clone());
+                }
+            }
+        } else {
+            // Auto-detect: symlink every executable the package installed
+            // other than the primary binary.
+            for exe in detect_package_executables(&d.package) {
+                if exe == primary_cmd || exe == name {
+                    continue;
+                }
+                if let Some(p) = find_in_path(&exe) {
+                    symlink_binary(&p, bin_dir, &exe)?;
+                    extra_symlinked.push(exe.clone());
+                    auto_detected_extras.push(exe.clone());
+                }
+            }
+        }
+
+        let version = installed_version(&d.package)
+            .or_else(|| version_from_path(&target))
+            .unwrap_or_else(|| "unknown".to_string());
         pb.finish_with_message(format!(
             "{} {name}  {version}",
             output::success_checkmark(colored)
@@ -145,7 +178,9 @@ impl SourceAdapter for DnfAdapter {
             url: None,
             sha256: sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
+            extra_binaries: extra_symlinked,
             auto_binary: auto_detected,
+            auto_extra_binaries: auto_detected_extras,
         })
     }
 }
@@ -199,15 +234,14 @@ pub async fn install_dnf_library(
         url: None,
         sha256: None,
         installed_at: chrono::Utc::now(),
+        extra_binaries: vec![],
         auto_binary: None,
+        auto_extra_binaries: vec![],
     })
 }
 
 /// Run `dnf` with the given args, using sudo if required by `priv_mode`.
-fn dnf(
-    priv_mode: PrivilegeMode,
-    args: &[&str],
-) -> Result<std::process::ExitStatus, GripError> {
+fn dnf(priv_mode: PrivilegeMode, args: &[&str]) -> Result<std::process::ExitStatus, GripError> {
     let status = match priv_mode {
         PrivilegeMode::Root => Command::new("dnf")
             .args(args)
@@ -309,6 +343,29 @@ pub(crate) fn parse_dnf_info_output(output: &str) -> Option<String> {
     }
 }
 
+/// Query the installed version by looking up which RPM package owns `path`.
+/// Used as a fallback when the manifest package name doesn't match the RPM name exactly.
+fn version_from_path(path: &std::path::Path) -> Option<String> {
+    let path_str = path.to_str()?;
+    let out = Command::new("rpm")
+        .args([
+            "-q",
+            "-f",
+            path_str,
+            "--queryformat",
+            "%{VERSION}-%{RELEASE}",
+        ])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// Query the actual installed version via rpm.
 pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("rpm")
@@ -352,10 +409,7 @@ Description  : ripgrep is a line-oriented search tool.";
     #[test]
     fn returns_version_only_when_release_absent() {
         let output = "Version      : 3.2.1\n";
-        assert_eq!(
-            parse_dnf_info_output(output),
-            Some("3.2.1".to_string())
-        );
+        assert_eq!(parse_dnf_info_output(output), Some("3.2.1".to_string()));
     }
 
     #[test]

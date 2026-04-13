@@ -31,7 +31,11 @@ impl SourceAdapter for AptAdapter {
         self.platform.is_linux()
     }
 
-    async fn resolve_latest(&self, entry: &BinaryEntry, _client: &Client) -> Result<String, GripError> {
+    async fn resolve_latest(
+        &self,
+        entry: &BinaryEntry,
+        _client: &Client,
+    ) -> Result<String, GripError> {
         let BinaryEntry::Apt(a) = entry else {
             return Err(GripError::Other("expected apt entry".into()));
         };
@@ -86,15 +90,15 @@ impl SourceAdapter for AptAdapter {
                 .unwrap_or(false);
 
             if !ok {
-                return Err(GripError::CommandFailed(format!(
-                    "apt-get install {pkg}"
-                )));
+                return Err(GripError::CommandFailed(format!("apt-get install {pkg}")));
             }
         }
 
         let which_post = Command::new("which").arg(cmd_name).output()?;
         let (target, auto_detected) = if which_post.status.success() {
-            let path_str = String::from_utf8_lossy(&which_post.stdout).trim().to_string();
+            let path_str = String::from_utf8_lossy(&which_post.stdout)
+                .trim()
+                .to_string();
             (std::path::PathBuf::from(path_str), None)
         } else if a.binary.is_none() {
             // No explicit binary override — try to discover the executable from
@@ -104,8 +108,9 @@ impl SourceAdapter for AptAdapter {
                 [single] => {
                     let which_cand = Command::new("which").arg(single).output()?;
                     if which_cand.status.success() {
-                        let path_str =
-                            String::from_utf8_lossy(&which_cand.stdout).trim().to_string();
+                        let path_str = String::from_utf8_lossy(&which_cand.stdout)
+                            .trim()
+                            .to_string();
                         (std::path::PathBuf::from(path_str), Some(single.clone()))
                     } else {
                         return Err(GripError::CommandFailed(format!(
@@ -141,7 +146,44 @@ impl SourceAdapter for AptAdapter {
         };
         symlink_binary(&target, bin_dir, name)?;
 
-        let version = installed_version(&a.package).unwrap_or_else(|| "unknown".to_string());
+        let primary_cmd = cmd_name;
+        let mut extra_symlinked: Vec<String> = Vec::new();
+        let mut auto_detected_extras: Vec<String> = Vec::new();
+
+        if let Some(extras) = &a.extra_binaries {
+            // Manually declared extras — symlink each.
+            for extra in extras {
+                let which_extra = Command::new("which").arg(extra).output()?;
+                if which_extra.status.success() {
+                    let path_str = String::from_utf8_lossy(&which_extra.stdout)
+                        .trim()
+                        .to_string();
+                    symlink_binary(&std::path::PathBuf::from(path_str), bin_dir, extra)?;
+                    extra_symlinked.push(extra.clone());
+                }
+            }
+        } else {
+            // Auto-detect: symlink every executable the package installed
+            // other than the primary binary.
+            for exe in detect_package_executables(&a.package) {
+                if exe == primary_cmd || exe == name {
+                    continue;
+                }
+                let which_extra = Command::new("which").arg(&exe).output()?;
+                if which_extra.status.success() {
+                    let path_str = String::from_utf8_lossy(&which_extra.stdout)
+                        .trim()
+                        .to_string();
+                    symlink_binary(&std::path::PathBuf::from(path_str), bin_dir, &exe)?;
+                    extra_symlinked.push(exe.clone());
+                    auto_detected_extras.push(exe.clone());
+                }
+            }
+        }
+
+        let version = installed_version(&a.package)
+            .or_else(|| version_from_path(&target))
+            .unwrap_or_else(|| "unknown".to_string());
         pb.finish_with_message(format!(
             "{} {name}  {version}",
             output::success_checkmark(colored)
@@ -153,7 +195,9 @@ impl SourceAdapter for AptAdapter {
             url: None,
             sha256: sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
+            extra_binaries: extra_symlinked,
             auto_binary: auto_detected,
+            auto_extra_binaries: auto_detected_extras,
         })
     }
 }
@@ -191,9 +235,7 @@ pub async fn install_apt_library(
             .unwrap_or(false);
 
         if !ok {
-            return Err(GripError::CommandFailed(format!(
-                "apt-get install {pkg}"
-            )));
+            return Err(GripError::CommandFailed(format!("apt-get install {pkg}")));
         }
     }
 
@@ -209,7 +251,9 @@ pub async fn install_apt_library(
         url: None,
         sha256: None,
         installed_at: chrono::Utc::now(),
+        extra_binaries: vec![],
         auto_binary: None,
+        auto_extra_binaries: vec![],
     })
 }
 
@@ -237,10 +281,7 @@ fn detect_package_executables(package: &str) -> Vec<String> {
 
 /// Run `apt-get` with the given args, using sudo if required by `priv_mode`.
 /// Returns the exit status of the command.
-fn apt_get(
-    priv_mode: PrivilegeMode,
-    args: &[&str],
-) -> Result<std::process::ExitStatus, GripError> {
+fn apt_get(priv_mode: PrivilegeMode, args: &[&str]) -> Result<std::process::ExitStatus, GripError> {
     let status = match priv_mode {
         PrivilegeMode::Root => Command::new("apt-get")
             .env("DEBIAN_FRONTEND", "noninteractive")
@@ -284,6 +325,25 @@ pub(crate) fn parse_apt_cache_policy_output(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Query the installed version by looking up which dpkg package owns `path`.
+/// Used as a fallback when the manifest package name doesn't match the dpkg name exactly.
+fn version_from_path(path: &std::path::Path) -> Option<String> {
+    let path_str = path.to_str()?;
+    let out = Command::new("dpkg").args(["-S", path_str]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Output format: "package-name: /path/to/file" or "package:arch: /path/to/file"
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next()?;
+    // Split on ':' — first token is package name (possibly with ":arch" stripped)
+    let pkg = line.split(':').next()?.trim();
+    if pkg.is_empty() {
+        return None;
+    }
+    installed_version(pkg)
 }
 
 /// Query the actual installed version via dpkg-query.

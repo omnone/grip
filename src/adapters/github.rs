@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use semver::{Version, VersionReq};
 
 use std::sync::Arc;
 
@@ -52,7 +52,11 @@ impl SourceAdapter for GithubAdapter {
         true
     }
 
-    async fn resolve_latest(&self, entry: &BinaryEntry, client: &Client) -> Result<String, GripError> {
+    async fn resolve_latest(
+        &self,
+        entry: &BinaryEntry,
+        client: &Client,
+    ) -> Result<String, GripError> {
         let BinaryEntry::Github(g) = entry else {
             return Err(GripError::Other("expected github entry".into()));
         };
@@ -125,10 +129,7 @@ impl SourceAdapter for GithubAdapter {
         })?;
 
         // Match asset
-        let pattern = g
-            .asset_pattern
-            .clone()
-            .unwrap_or_else(|| name.to_string());
+        let pattern = g.asset_pattern.clone().unwrap_or_else(|| name.to_string());
 
         let asset = match_asset(&release.assets, &pattern, &self.platform)
             .ok_or_else(|| GripError::NoMatchingAsset(pattern.clone()))?;
@@ -147,7 +148,13 @@ impl SourceAdapter for GithubAdapter {
             } else {
                 pb.set_message(format!("{name}  fetching {asset_name}"));
                 let sha = download_with_progress(
-                    client, &download_url, tmp.path(), name, asset_size, &pb, colored,
+                    client,
+                    &download_url,
+                    tmp.path(),
+                    name,
+                    asset_size,
+                    &pb,
+                    colored,
                 )
                 .await?;
                 cache.store(&download_url, tmp.path()).ok();
@@ -156,7 +163,13 @@ impl SourceAdapter for GithubAdapter {
         } else {
             pb.set_message(format!("{name}  fetching {asset_name}"));
             download_with_progress(
-                client, &download_url, tmp.path(), name, asset_size, &pb, colored,
+                client,
+                &download_url,
+                tmp.path(),
+                name,
+                asset_size,
+                &pb,
+                colored,
             )
             .await?
         };
@@ -168,30 +181,31 @@ impl SourceAdapter for GithubAdapter {
             if let Some(checksums_pat) = &g.checksums_asset_pattern {
                 // ── Mode 2: signed checksums file ────────────────────────────
                 // Find the checksums asset, then find the signature of that checksums file.
-                let checksums_asset =
-                    find_asset_by_pattern(&release.assets, checksums_pat).ok_or_else(|| {
-                        GripError::GpgVerificationFailed {
-                            name: name.to_string(),
-                            detail: format!(
-                                "no checksums asset matched pattern '{}'; \
+                let checksums_asset = find_asset_by_pattern(&release.assets, checksums_pat)
+                    .ok_or_else(|| GripError::GpgVerificationFailed {
+                        name: name.to_string(),
+                        detail: format!(
+                            "no checksums asset matched pattern '{}'; \
                                  check checksums_asset_pattern in grip.toml",
-                                checksums_pat
-                            ),
-                        }
+                            checksums_pat
+                        ),
                     })?;
                 let checksums_name = checksums_asset.name.clone();
                 let checksums_url = checksums_asset.browser_download_url.clone();
 
-                let checksums_sig_asset =
-                    find_sig_asset(&release.assets, &checksums_name, g.sig_asset_pattern.as_deref())
-                        .ok_or_else(|| GripError::GpgVerificationFailed {
-                            name: name.to_string(),
-                            detail: format!(
-                                "no signature asset found for checksums file '{}'; \
+                let checksums_sig_asset = find_sig_asset(
+                    &release.assets,
+                    &checksums_name,
+                    g.sig_asset_pattern.as_deref(),
+                )
+                .ok_or_else(|| GripError::GpgVerificationFailed {
+                    name: name.to_string(),
+                    detail: format!(
+                        "no signature asset found for checksums file '{}'; \
                                  set sig_asset_pattern in grip.toml to locate it explicitly",
-                                checksums_name
-                            ),
-                        })?;
+                        checksums_name
+                    ),
+                })?;
 
                 let checksums_tmp = tempfile::NamedTempFile::new()?;
                 let sig_tmp = tempfile::NamedTempFile::new()?;
@@ -232,7 +246,7 @@ impl SourceAdapter for GithubAdapter {
 
         // Extract or copy
         pb.set_message(format!("{name}  extracting..."));
-        extract_binary(tmp.path(), &asset_name, g, name, bin_dir)?;
+        let extra_installed = extract_binary(tmp.path(), &asset_name, g, name, bin_dir)?;
 
         pb.finish_with_message(format!(
             "{} {name}  {version}",
@@ -245,7 +259,9 @@ impl SourceAdapter for GithubAdapter {
             url: Some(download_url),
             sha256: Some(sha256),
             installed_at: chrono::Utc::now(),
+            extra_binaries: extra_installed,
             auto_binary: None,
+            auto_extra_binaries: vec![],
         })
     }
 }
@@ -253,19 +269,15 @@ impl SourceAdapter for GithubAdapter {
 /// Returns `true` if `v` looks like a semver range rather than a pinned version.
 fn is_version_range(v: &str) -> bool {
     let t = v.trim();
-    t.starts_with(['^', '~', '>', '<', '=', '*'])
-        || t.contains(".*")
-        || t.contains(" ")
+    t.starts_with(['^', '~', '>', '<', '=', '*']) || t.contains(".*") || t.contains(" ")
 }
 
 /// Fetch up to 100 releases from GitHub and return the highest version matching `req`.
-async fn resolve_range(
-    repo: &str,
-    req: &VersionReq,
-    client: &Client,
-) -> Result<String, GripError> {
+async fn resolve_range(repo: &str, req: &VersionReq, client: &Client) -> Result<String, GripError> {
     #[derive(Deserialize)]
-    struct ReleaseTag { tag_name: String }
+    struct ReleaseTag {
+        tag_name: String,
+    }
 
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
     let releases: Vec<ReleaseTag> = client
@@ -282,7 +294,9 @@ async fn resolve_range(
         .iter()
         .filter_map(|r| {
             let stripped = r.tag_name.trim_start_matches('v');
-            Version::parse(stripped).ok().map(|v| (v, stripped.to_string()))
+            Version::parse(stripped)
+                .ok()
+                .map(|v| (v, stripped.to_string()))
         })
         .filter(|(v, _)| req.matches(v))
         .max_by(|(a, _), (b, _)| a.cmp(b))
@@ -371,15 +385,16 @@ async fn download_with_progress(
     Ok(sha256)
 }
 
-/// Unpack `archive_path` (or copy it if it is a raw binary), locate the target binary, copy it
-/// into `bin_dir`, and make it executable.
+/// Unpack `archive_path` (or copy it if it is a raw binary), locate the target binary (and any
+/// extra binaries), copy them into `bin_dir`, and make them executable.
+/// Returns the list of extra binary names that were successfully installed.
 fn extract_binary(
     archive_path: &Path,
     asset_name: &str,
     g: &GithubEntry,
     binary_name: &str,
     bin_dir: &Path,
-) -> Result<PathBuf, GripError> {
+) -> Result<Vec<String>, GripError> {
     let tmp_dir = tempfile::tempdir()?;
     let lower = asset_name.to_lowercase();
 
@@ -390,22 +405,32 @@ fn extract_binary(
     } else if lower.ends_with(".zip") {
         extract_zip(archive_path, tmp_dir.path())?;
     } else {
-        // Assume it's a raw binary
+        // Raw binary — extra_binaries are not extractable from a non-archive
         let final_dest = bin_dir.join(binary_name);
         std::fs::copy(archive_path, &final_dest)?;
         crate::bin_dir::make_executable(&final_dest)?;
-        return Ok(final_dest);
+        return Ok(vec![]);
     }
 
-    // Find the binary inside the extracted dir
+    // Find and install the primary binary
     let want = g.binary.as_deref().unwrap_or(binary_name);
     let found = find_binary_in_dir(tmp_dir.path(), want)?;
     let final_dest = bin_dir.join(binary_name);
     std::fs::copy(&found, &final_dest)?;
     crate::bin_dir::make_executable(&final_dest)?;
-    // Keep tmp_dir alive by forgetting it
+
+    // Find and install any extra binaries from the same archive
+    let mut extra_installed: Vec<String> = Vec::new();
+    for extra in g.extra_binaries.iter().flat_map(|v| v.iter()) {
+        let extra_found = find_binary_in_dir(tmp_dir.path(), extra)?;
+        let extra_dest = bin_dir.join(extra);
+        std::fs::copy(&extra_found, &extra_dest)?;
+        crate::bin_dir::make_executable(&extra_dest)?;
+        extra_installed.push(extra.clone());
+    }
+
     let _ = tmp_dir.keep();
-    Ok(final_dest)
+    Ok(extra_installed)
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), GripError> {
@@ -427,7 +452,8 @@ fn extract_tar_bz2(archive: &Path, dest: &Path) -> Result<(), GripError> {
 fn extract_zip(archive: &Path, dest: &Path) -> Result<(), GripError> {
     let file = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| GripError::Other(e.to_string()))?;
-    zip.extract(dest).map_err(|e| GripError::Other(e.to_string()))?;
+    zip.extract(dest)
+        .map_err(|e| GripError::Other(e.to_string()))?;
     Ok(())
 }
 
@@ -460,7 +486,11 @@ fn find_asset_by_pattern<'a>(assets: &'a [Asset], pattern: &str) -> Option<&'a A
 
 /// Download `url` to `dest` without a progress bar (used for small ancillary files like
 /// signature files and checksums).
-async fn download_asset(client: &Client, url: &str, dest: &std::path::Path) -> Result<(), GripError> {
+async fn download_asset(
+    client: &Client,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), GripError> {
     let mut resp = client
         .get(url)
         .header("User-Agent", "grip/0.1")
@@ -500,7 +530,9 @@ fn find_sig_asset<'a>(
         "checksums.sig".to_string(),
         "checksums.asc".to_string(),
     ];
-    assets.iter().find(|a| candidates.iter().any(|c| c == &a.name))
+    assets
+        .iter()
+        .find(|a| candidates.iter().any(|c| c == &a.name))
 }
 
 #[cfg(test)]

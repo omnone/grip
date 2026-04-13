@@ -34,11 +34,19 @@ pub struct OutputCfg {
 
 impl OutputCfg {
     pub fn use_color_stderr(&self) -> bool {
-        resolve_color(self.color_when, std::env::var_os("NO_COLOR").is_some(), io::stderr().is_terminal())
+        resolve_color(
+            self.color_when,
+            std::env::var_os("NO_COLOR").is_some(),
+            io::stderr().is_terminal(),
+        )
     }
 
     pub fn use_color_stdout(&self) -> bool {
-        resolve_color(self.color_when, std::env::var_os("NO_COLOR").is_some(), io::stdout().is_terminal())
+        resolve_color(
+            self.color_when,
+            std::env::var_os("NO_COLOR").is_some(),
+            io::stdout().is_terminal(),
+        )
     }
 }
 

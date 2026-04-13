@@ -95,7 +95,10 @@ mod tests {
 
     #[test]
     fn os_str_other() {
-        assert_eq!(make(OS::Other("freebsd".into()), Arch::X86_64).os_str(), "freebsd");
+        assert_eq!(
+            make(OS::Other("freebsd".into()), Arch::X86_64).os_str(),
+            "freebsd"
+        );
     }
 
     // ── arch_str ──────────────────────────────────────────────────────────────
@@ -112,7 +115,10 @@ mod tests {
 
     #[test]
     fn arch_str_other() {
-        assert_eq!(make(OS::Linux, Arch::Other("riscv64".into())).arch_str(), "riscv64");
+        assert_eq!(
+            make(OS::Linux, Arch::Other("riscv64".into())).arch_str(),
+            "riscv64"
+        );
     }
 
     // ── is_linux ──────────────────────────────────────────────────────────────

@@ -64,7 +64,9 @@ fn assert_success(out: &Output, context: &str) {
 #[test]
 #[ignore]
 fn apt_sync_installs_binary() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -74,15 +76,23 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert!(project.path().join(".bin/jq").exists(), ".bin/jq not created");
-    assert!(project.path().join("grip.lock").exists(), "grip.lock missing");
+    assert!(
+        project.path().join(".bin/jq").exists(),
+        ".bin/jq not created"
+    );
+    assert!(
+        project.path().join("grip.lock").exists(),
+        "grip.lock missing"
+    );
 }
 
 /// `grip check` passes after a successful `grip sync`.
 #[test]
 #[ignore]
 fn apt_check_passes_after_sync() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -99,7 +109,9 @@ jq = { source = "apt", package = "jq" }
 #[test]
 #[ignore]
 fn apt_list_shows_installed_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -113,14 +125,19 @@ jq = { source = "apt", package = "jq" }
     let out = grip(project.path(), &["list"]);
     assert_success(&out, "grip list");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("jq"), "expected 'jq' in grip list output, got: {stdout}");
+    assert!(
+        stdout.contains("jq"),
+        "expected 'jq' in grip list output, got: {stdout}"
+    );
 }
 
 /// Running `grip sync` twice is idempotent: the second call skips the already-installed binary.
 #[test]
 #[ignore]
 fn apt_sync_is_idempotent() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -130,7 +147,10 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "first grip sync");
-    assert_success(&grip(project.path(), &["sync"]), "second grip sync (idempotent)");
+    assert_success(
+        &grip(project.path(), &["sync"]),
+        "second grip sync (idempotent)",
+    );
     assert!(project.path().join(".bin/jq").exists());
 }
 
@@ -138,7 +158,9 @@ jq = { source = "apt", package = "jq" }
 #[test]
 #[ignore]
 fn apt_remove_deletes_entry() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -152,11 +174,17 @@ jq = { source = "apt", package = "jq" }
 
     assert_success(&grip(project.path(), &["remove", "jq"]), "grip remove jq");
 
-    assert!(!project.path().join(".bin/jq").exists(), ".bin/jq still exists after remove");
+    assert!(
+        !project.path().join(".bin/jq").exists(),
+        ".bin/jq still exists after remove"
+    );
 
     let out = grip(project.path(), &["list"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("jq"), "jq still appears in grip list after remove");
+    assert!(
+        !stdout.contains("jq"),
+        "jq still appears in grip list after remove"
+    );
 }
 
 /// Packages with a different on-PATH binary name work via the `binary` field.
@@ -164,7 +192,9 @@ jq = { source = "apt", package = "jq" }
 #[test]
 #[ignore]
 fn apt_binary_field_remaps_executable_name() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -174,14 +204,19 @@ fd = { source = "apt", package = "fd-find", binary = "fdfind" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert!(project.path().join(".bin/fd").exists(), ".bin/fd not created");
+    assert!(
+        project.path().join(".bin/fd").exists(),
+        ".bin/fd not created"
+    );
 }
 
 /// An optional (`required = false`) entry that fails does not fail `grip sync`.
 #[test]
 #[ignore]
 fn apt_optional_entry_failure_is_warning() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -202,7 +237,9 @@ nonexistent-grip-test-pkg = { source = "apt", package = "nonexistent-grip-test-p
 #[test]
 #[ignore]
 fn apt_library_install() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -215,14 +252,19 @@ zlib = { source = "apt", package = "zlib1g-dev" }
 
     let lock = std::fs::read_to_string(project.path().join("grip.lock"))
         .expect("grip.lock missing after library install");
-    assert!(lock.contains("zlib"), "expected 'zlib' in grip.lock, got:\n{lock}");
+    assert!(
+        lock.contains("zlib"),
+        "expected 'zlib' in grip.lock, got:\n{lock}"
+    );
 }
 
 /// `grip sync --verify` re-checks SHA-256 of an already-installed binary.
 #[test]
 #[ignore]
 fn apt_sync_verify_passes_on_clean_install() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -232,14 +274,19 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert_success(&grip(project.path(), &["sync", "--verify"]), "grip sync --verify");
+    assert_success(
+        &grip(project.path(), &["sync", "--verify"]),
+        "grip sync --verify",
+    );
 }
 
 /// `grip doctor` reports no issues for a clean project.
 #[test]
 #[ignore]
 fn apt_doctor_clean_project() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"
@@ -256,7 +303,9 @@ jq = { source = "apt", package = "jq" }
 #[test]
 #[ignore]
 fn apt_sync_multiple_binaries() {
-    if !in_container() { return; }
+    if !in_container() {
+        return;
+    }
 
     let project = setup_project(
         r#"

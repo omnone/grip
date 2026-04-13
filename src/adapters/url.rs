@@ -33,7 +33,11 @@ impl SourceAdapter for UrlAdapter {
         true
     }
 
-    async fn resolve_latest(&self, entry: &BinaryEntry, _client: &Client) -> Result<String, GripError> {
+    async fn resolve_latest(
+        &self,
+        entry: &BinaryEntry,
+        _client: &Client,
+    ) -> Result<String, GripError> {
         let BinaryEntry::Url(u) = entry else {
             return Err(GripError::Other("expected url entry".into()));
         };
@@ -62,7 +66,8 @@ impl SourceAdapter for UrlAdapter {
                 std::fs::copy(&cached, tmp.path())?;
                 crate::checksum::sha256_file(tmp.path()).map_err(GripError::Io)?
             } else {
-                let sha = download_url_to_file(client, &u.url, name, tmp.path(), &pb, colored).await?;
+                let sha =
+                    download_url_to_file(client, &u.url, name, tmp.path(), &pb, colored).await?;
                 cache.store(&u.url, tmp.path()).ok();
                 sha
             }
@@ -109,13 +114,14 @@ impl SourceAdapter for UrlAdapter {
                 )?;
             } else {
                 // ── Mode 1: direct binary signature ──────────────────────────
-                let sig_url = u.sig_url.as_deref().ok_or_else(|| {
-                    GripError::GpgVerificationFailed {
-                        name: name.to_string(),
-                        detail: "gpg_fingerprint is set but sig_url is missing in grip.toml"
-                            .to_string(),
-                    }
-                })?;
+                let sig_url =
+                    u.sig_url
+                        .as_deref()
+                        .ok_or_else(|| GripError::GpgVerificationFailed {
+                            name: name.to_string(),
+                            detail: "gpg_fingerprint is set but sig_url is missing in grip.toml"
+                                .to_string(),
+                        })?;
                 let sig_tmp = tempfile::NamedTempFile::new()?;
                 download_url(client, sig_url, sig_tmp.path()).await?;
                 verify_gpg_signature(tmp.path(), sig_tmp.path(), fingerprint, name)?;
@@ -129,14 +135,25 @@ impl SourceAdapter for UrlAdapter {
         let binary_name = u.binary.as_deref().unwrap_or(name);
 
         let tmp_dir = tempfile::tempdir()?;
+        let mut extra_installed: Vec<String> = Vec::new();
         if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
             extract_tar_gz(tmp.path(), tmp_dir.path())?;
             let found = find_in_dir(tmp_dir.path(), binary_name)?;
             copy_binary(&found, bin_dir, name)?;
+            for extra in u.extra_binaries.iter().flat_map(|v| v.iter()) {
+                let extra_found = find_in_dir(tmp_dir.path(), extra)?;
+                copy_binary(&extra_found, bin_dir, extra)?;
+                extra_installed.push(extra.clone());
+            }
         } else if lower.ends_with(".zip") {
             extract_zip(tmp.path(), tmp_dir.path())?;
             let found = find_in_dir(tmp_dir.path(), binary_name)?;
             copy_binary(&found, bin_dir, name)?;
+            for extra in u.extra_binaries.iter().flat_map(|v| v.iter()) {
+                let extra_found = find_in_dir(tmp_dir.path(), extra)?;
+                copy_binary(&extra_found, bin_dir, extra)?;
+                extra_installed.push(extra.clone());
+            }
         } else {
             copy_binary(tmp.path(), bin_dir, name)?;
         }
@@ -153,7 +170,9 @@ impl SourceAdapter for UrlAdapter {
             url: Some(u.url.clone()),
             sha256: Some(sha256),
             installed_at: chrono::Utc::now(),
+            extra_binaries: extra_installed,
             auto_binary: None,
+            auto_extra_binaries: vec![],
         })
     }
 }
@@ -219,7 +238,8 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), GripError> {
 fn extract_zip(archive: &Path, dest: &Path) -> Result<(), GripError> {
     let file = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| GripError::Other(e.to_string()))?;
-    zip.extract(dest).map_err(|e| GripError::Other(e.to_string()))?;
+    zip.extract(dest)
+        .map_err(|e| GripError::Other(e.to_string()))?;
     Ok(())
 }
 

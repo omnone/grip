@@ -66,7 +66,10 @@ pub enum Commands {
         source: Option<String>,
         #[arg(long)]
         version: Option<String>,
-        #[arg(long, help = "GitHub `owner/repo` (optional if NAME is already owner/repo)")]
+        #[arg(
+            long,
+            help = "GitHub `owner/repo` (optional if NAME is already owner/repo)"
+        )]
         repo: Option<String>,
         #[arg(long, help = "Direct download URL (required for --source url)")]
         url: Option<String>,

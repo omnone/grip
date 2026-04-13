@@ -47,6 +47,9 @@ pub struct InstallResult {
     /// Entries where the binary name was auto-detected and back-patched into grip.toml.
     /// Each element is `(entry_name, detected_binary_name)`.
     pub binary_overrides: Vec<(String, String)>,
+    /// Entries where extra binary names were auto-detected and back-patched into grip.toml.
+    /// Each element is `(entry_name, detected_extra_names)`.
+    pub extra_binary_overrides: Vec<(String, Vec<String>)>,
 }
 
 /// Run a full install pass.
@@ -110,6 +113,7 @@ pub async fn run_install(
         failed: vec![],
         warned: vec![],
         binary_overrides: vec![],
+        extra_binary_overrides: vec![],
     };
 
     // Collect required flags before processing entries.
@@ -137,9 +141,21 @@ pub async fn run_install(
         }
 
         let bin_path = bin_dir.join(name);
-        if lock.get(name).is_some() && bin_path.exists() {
-            if verify || locked {
-                if let Some(lock_entry) = lock.get(name) {
+        if let Some(lock_entry) = lock.get(name) {
+            // All extras recorded in the lock must exist on disk.
+            let lock_extras_ok = lock_entry
+                .extra_binaries
+                .iter()
+                .all(|b| bin_dir.join(b).exists());
+            // All extras declared in the manifest must also exist on disk.
+            // This catches the case where extra_binaries was added to grip.toml
+            // after the last install, so the lock entry predates the field.
+            let manifest_extras_ok = entry
+                .extra_binaries()
+                .iter()
+                .all(|b| bin_dir.join(b).exists());
+            if bin_path.exists() && lock_extras_ok && manifest_extras_ok {
+                if verify || locked {
                     if let Some(expected) = &lock_entry.sha256 {
                         let got = sha256_file(&bin_path).map_err(GripError::Io)?;
                         if &got != expected {
@@ -150,9 +166,9 @@ pub async fn run_install(
                         }
                     }
                 }
+                outcome.skipped.push(name.clone());
+                continue;
             }
-            outcome.skipped.push(name.clone());
-            continue;
         }
 
         to_install.push((name.clone(), entry.clone(), meta.post_install.clone()));
@@ -201,9 +217,13 @@ pub async fn run_install(
             for name in rejected {
                 let required = required_flags.get(&name).copied().unwrap_or(true);
                 if required {
-                    outcome.failed.push((name, "shell install rejected by user".to_string()));
+                    outcome
+                        .failed
+                        .push((name, "shell install rejected by user".to_string()));
                 } else {
-                    outcome.warned.push((name, "shell install rejected by user".to_string()));
+                    outcome
+                        .warned
+                        .push((name, "shell install rejected by user".to_string()));
                 }
             }
         }
@@ -255,9 +275,13 @@ pub async fn run_install(
                 "{} {name}  skipped — unsupported platform",
                 output::dim(ui.colored, "-")
             ));
-            Err(GripError::UnsupportedPlatform { adapter: adapter.name().to_string() })
+            Err(GripError::UnsupportedPlatform {
+                adapter: adapter.name().to_string(),
+            })
         } else {
-            adapter.install(&name, &entry, &bin_dir, &client, pb, ui.colored).await
+            adapter
+                .install(&name, &entry, &bin_dir, &client, pb, ui.colored)
+                .await
         };
 
         handle_install_result(
@@ -374,8 +398,13 @@ pub async fn run_install(
 
     let lib_total = libs_to_install.len();
     if lib_total > 0 && !ui.quiet {
-        let noun = if lib_total == 1 { "library" } else { "libraries" };
-        mp.println(format!("  Installing {lib_total} {noun}...\n")).ok();
+        let noun = if lib_total == 1 {
+            "library"
+        } else {
+            "libraries"
+        };
+        mp.println(format!("  Installing {lib_total} {noun}...\n"))
+            .ok();
     }
 
     // Libraries are installed sequentially to avoid package manager lock contention.
@@ -395,14 +424,18 @@ pub async fn run_install(
         let result = match &entry {
             LibraryEntry::Apt(a) => {
                 if !platform.is_linux() {
-                    Err(GripError::UnsupportedPlatform { adapter: "apt".to_string() })
+                    Err(GripError::UnsupportedPlatform {
+                        adapter: "apt".to_string(),
+                    })
                 } else {
                     apt_adapter::install_apt_library(&name, a, pb.clone(), ui.colored).await
                 }
             }
             LibraryEntry::Dnf(d) => {
                 if !platform.is_linux() || !which_exists("dnf") {
-                    Err(GripError::UnsupportedPlatform { adapter: "dnf".to_string() })
+                    Err(GripError::UnsupportedPlatform {
+                        adapter: "dnf".to_string(),
+                    })
                 } else {
                     dnf_adapter::install_dnf_library(&name, d, pb.clone(), ui.colored).await
                 }
@@ -422,7 +455,8 @@ pub async fn run_install(
                                 eprintln!("warning: post_install failed for {name}: {cmd}");
                             } else {
                                 let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}")).ok();
+                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
+                                    .ok();
                             }
                         }
                         Err(e) => {
@@ -430,7 +464,8 @@ pub async fn run_install(
                                 eprintln!("warning: post_install error for {name}: {e}");
                             } else {
                                 let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install error for {name}: {e}")).ok();
+                                mp.println(format!("  {g}  post_install error for {name}: {e}"))
+                                    .ok();
                             }
                         }
                         _ => {}
@@ -457,9 +492,9 @@ pub async fn run_install(
         lock.save(&lock_path)?;
     }
 
-    // Back-patch grip.toml with any auto-detected binary names so subsequent
-    // runs don't need to re-detect.
-    if !outcome.binary_overrides.is_empty() {
+    // Back-patch grip.toml with any auto-detected binary names and extra binaries
+    // so subsequent runs don't need to re-detect.
+    if !outcome.binary_overrides.is_empty() || !outcome.extra_binary_overrides.is_empty() {
         let mut manifest = Manifest::load(&manifest_path)?;
         for (entry_name, detected_binary) in &outcome.binary_overrides {
             match manifest.binaries.get_mut(entry_name) {
@@ -468,6 +503,21 @@ pub async fn run_install(
                 }
                 Some(crate::config::manifest::BinaryEntry::Apt(a)) if a.binary.is_none() => {
                     a.binary = Some(detected_binary.clone());
+                }
+                _ => {}
+            }
+        }
+        for (entry_name, extras) in &outcome.extra_binary_overrides {
+            match manifest.binaries.get_mut(entry_name) {
+                Some(crate::config::manifest::BinaryEntry::Dnf(d))
+                    if d.extra_binaries.is_none() =>
+                {
+                    d.extra_binaries = Some(extras.clone());
+                }
+                Some(crate::config::manifest::BinaryEntry::Apt(a))
+                    if a.extra_binaries.is_none() =>
+                {
+                    a.extra_binaries = Some(extras.clone());
                 }
                 _ => {}
             }
@@ -492,14 +542,18 @@ fn handle_install_result(
     match res {
         Ok(lock_entry) => {
             if let Some(cmd) = post_install {
-                let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .status();
                 match status {
                     Ok(s) if !s.success() => {
                         if ui.quiet {
                             eprintln!("warning: post_install failed for {name}: {cmd}");
                         } else {
                             let g = output::warn_glyph(ui.colored);
-                            mp.println(format!("  {g}  post_install failed for {name}: {cmd}")).ok();
+                            mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
+                                .ok();
                         }
                     }
                     Err(e) => {
@@ -507,7 +561,8 @@ fn handle_install_result(
                             eprintln!("warning: post_install error for {name}: {e}");
                         } else {
                             let g = output::warn_glyph(ui.colored);
-                            mp.println(format!("  {g}  post_install error for {name}: {e}")).ok();
+                            mp.println(format!("  {g}  post_install error for {name}: {e}"))
+                                .ok();
                         }
                     }
                     _ => {}
@@ -515,6 +570,11 @@ fn handle_install_result(
             }
             if let Some(detected) = lock_entry.auto_binary.clone() {
                 outcome.binary_overrides.push((name.clone(), detected));
+            }
+            if !lock_entry.auto_extra_binaries.is_empty() {
+                outcome
+                    .extra_binary_overrides
+                    .push((name.clone(), lock_entry.auto_extra_binaries.clone()));
             }
             outcome.installed.push(name);
             lock.upsert(lock_entry);
@@ -566,7 +626,14 @@ jq = { source = "github", repo = "jqlang/jq", version = "1.7.1" }
 
         // jq is pinned so the guard passes; the install may succeed or fail for
         // other reasons (network) but must NOT fail with UnpinnedEntries.
-        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true)).await;
+        let result = run_install(
+            false,
+            false,
+            None,
+            Some(tmp.path().to_path_buf()),
+            opts(true),
+        )
+        .await;
         if let Err(e) = result {
             assert!(
                 !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),
@@ -584,9 +651,15 @@ jq = { source = "github", repo = "jqlang/jq" }
 "#;
         std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
 
-        let err = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true))
-            .await
-            .unwrap_err();
+        let err = run_install(
+            false,
+            false,
+            None,
+            Some(tmp.path().to_path_buf()),
+            opts(true),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(err, crate::error::GripError::UnpinnedEntries { .. }),
@@ -606,9 +679,15 @@ fd = { source = "github", repo = "sharkdp/fd", version = "9.0.0" }
 "#;
         std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
 
-        let err = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true))
-            .await
-            .unwrap_err();
+        let err = run_install(
+            false,
+            false,
+            None,
+            Some(tmp.path().to_path_buf()),
+            opts(true),
+        )
+        .await
+        .unwrap_err();
 
         let msg = err.to_string();
         // jq and rg are unpinned; fd is pinned
@@ -629,7 +708,14 @@ mytool = { source = "url", url = "https://example.com/mytool-1.0" }
 
         // The guard passes; the install will likely fail for other reasons but
         // must NOT fail with UnpinnedEntries.
-        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(true)).await;
+        let result = run_install(
+            false,
+            false,
+            None,
+            Some(tmp.path().to_path_buf()),
+            opts(true),
+        )
+        .await;
         if let Err(e) = result {
             assert!(
                 !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),
@@ -649,7 +735,14 @@ jq = { source = "github", repo = "jqlang/jq" }
 
         // Without require_pins the guard is skipped — install may fail for other
         // reasons (network offline in CI) but not with UnpinnedEntries.
-        let result = run_install(false, false, None, Some(tmp.path().to_path_buf()), opts(false)).await;
+        let result = run_install(
+            false,
+            false,
+            None,
+            Some(tmp.path().to_path_buf()),
+            opts(false),
+        )
+        .await;
         if let Err(e) = result {
             assert!(
                 !matches!(e, crate::error::GripError::UnpinnedEntries { .. }),

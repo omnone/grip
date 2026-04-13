@@ -312,6 +312,7 @@ version       = "1.7.1"           # exact pin
 # version     = "^1.7"            # semver range: resolves to latest 1.x
 asset_pattern = "jq-linux-amd64"  # optional glob to select the right asset
 binary        = "jq"              # optional: name of the binary inside the archive
+extra_binaries = ["jqfmt"]        # optional: additional binaries to extract from the same archive
 ```
 
 **Semver ranges** (`^`, `~`, `>=`, `>`, `<`, `<=`, `*`) are resolved at install time against the GitHub releases list. The concrete version is written to `grip.lock`; `--locked` mode pins to that exact version on subsequent installs. If no `asset_pattern` is set, grip falls back to a platform-aware heuristic (matches on OS + architecture strings in the asset filename).
@@ -338,10 +339,11 @@ See [SECURITY.md](SECURITY.md) for a full explanation of Mode 1 vs Mode 2 verifi
 
 ```toml
 [binaries.mytool]
-source = "url"
-url    = "https://example.com/releases/mytool-linux-amd64.tar.gz"
-sha256 = "abc123..."  # optional hex digest; verified after download
-binary = "mytool"     # optional: name of the binary inside the archive
+source         = "url"
+url            = "https://example.com/releases/mytool-linux-amd64.tar.gz"
+sha256         = "abc123..."   # optional hex digest; verified after download
+binary         = "mytool"      # optional: name of the binary inside the archive
+extra_binaries = ["mytoolfmt"] # optional: additional binaries to extract from the same archive
 
 # Optional GPG verification:
 gpg_fingerprint      = "AF436C3B58B2E3B2"
@@ -362,7 +364,14 @@ source  = "apt"       # or "dnf"
 package = "ripgrep"   # defaults to the entry name
 binary  = "rg"        # optional: on-PATH command when it differs from the table key
 version = "14.1.0"    # optional: exact package version
+
+[binaries.ffmpeg]
+source         = "apt"
+package        = "ffmpeg"
+extra_binaries = ["ffprobe", "ffplay"]  # additional binaries installed by the same package
 ```
+
+When `extra_binaries` is set, grip symlinks each listed binary from its on-PATH location into `.bin/` alongside the primary binary. The lock entry records all extra binary names so `grip check` can verify they are all present.
 
 grip requires root or passwordless `sudo` to invoke `apt-get` / `dnf`. It checks privileges once before any install and fails with a clear message rather than prompting for a password mid-run.
 

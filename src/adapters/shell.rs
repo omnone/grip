@@ -27,7 +27,11 @@ impl SourceAdapter for ShellAdapter {
         true
     }
 
-    async fn resolve_latest(&self, entry: &BinaryEntry, _client: &Client) -> Result<String, GripError> {
+    async fn resolve_latest(
+        &self,
+        entry: &BinaryEntry,
+        _client: &Client,
+    ) -> Result<String, GripError> {
         let BinaryEntry::Shell(s) = entry else {
             return Err(GripError::Other("expected shell entry".into()));
         };
@@ -49,7 +53,9 @@ impl SourceAdapter for ShellAdapter {
 
         if !s.allow_shell {
             pb.finish_and_clear();
-            return Err(GripError::ShellNotAllowed { name: name.to_string() });
+            return Err(GripError::ShellNotAllowed {
+                name: name.to_string(),
+            });
         }
 
         pb.set_message(format!("{name}  running install script..."));
@@ -76,7 +82,9 @@ impl SourceAdapter for ShellAdapter {
             url: None,
             sha256: crate::bin_dir::sha256_of_installed(bin_dir, name),
             installed_at: chrono::Utc::now(),
+            extra_binaries: s.extra_binaries.clone().unwrap_or_default(),
             auto_binary: None,
+            auto_extra_binaries: vec![],
         })
     }
 }
@@ -97,6 +105,7 @@ mod tests {
             install_cmd: cmd.to_string(),
             version: version.map(String::from),
             allow_shell,
+            extra_binaries: None,
             meta: CommonMeta::default(),
         })
     }
@@ -136,13 +145,23 @@ mod tests {
 
         let client = reqwest::Client::new();
         let result = ShellAdapter
-            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .install(
+                "mytool",
+                &entry,
+                &bin_dir,
+                &client,
+                ProgressBar::hidden(),
+                false,
+            )
             .await
             .unwrap();
 
         assert_eq!(result.source, "shell");
         assert_eq!(result.version, "1.0.0");
-        assert!(result.sha256.is_some(), "sha256 must be set when binary exists in .bin/");
+        assert!(
+            result.sha256.is_some(),
+            "sha256 must be set when binary exists in .bin/"
+        );
         assert_eq!(
             result.sha256.as_deref().unwrap(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
@@ -160,11 +179,21 @@ mod tests {
 
         let client = reqwest::Client::new();
         let result = ShellAdapter
-            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .install(
+                "mytool",
+                &entry,
+                &bin_dir,
+                &client,
+                ProgressBar::hidden(),
+                false,
+            )
             .await
             .unwrap();
 
-        assert!(result.sha256.is_none(), "sha256 must be None when no file is placed in .bin/");
+        assert!(
+            result.sha256.is_none(),
+            "sha256 must be None when no file is placed in .bin/"
+        );
         assert_eq!(result.version, "custom");
     }
 
@@ -180,7 +209,14 @@ mod tests {
         let entry = shell_entry_with_allow("true", None, false);
         let client = reqwest::Client::new();
         let result = ShellAdapter
-            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .install(
+                "mytool",
+                &entry,
+                &bin_dir,
+                &client,
+                ProgressBar::hidden(),
+                false,
+            )
             .await;
 
         assert!(
@@ -200,9 +236,19 @@ mod tests {
         let entry = shell_entry("exit 1", None);
         let client = reqwest::Client::new();
         let result = ShellAdapter
-            .install("mytool", &entry, &bin_dir, &client, ProgressBar::hidden(), false)
+            .install(
+                "mytool",
+                &entry,
+                &bin_dir,
+                &client,
+                ProgressBar::hidden(),
+                false,
+            )
             .await;
 
-        assert!(result.is_err(), "install must fail when the script exits non-zero");
+        assert!(
+            result.is_err(),
+            "install must fail when the script exits non-zero"
+        );
     }
 }

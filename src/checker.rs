@@ -14,8 +14,18 @@ pub enum CheckStatus {
     Ok,
     MissingBinary,
     MissingLockEntry,
-    VersionMismatch { expected: String, locked: String },
-    ChecksumMismatch { expected: String, got: String },
+    /// A secondary binary listed in the lock entry is absent from `.bin/`.
+    MissingExtraBinary {
+        name: String,
+    },
+    VersionMismatch {
+        expected: String,
+        locked: String,
+    },
+    ChecksumMismatch {
+        expected: String,
+        got: String,
+    },
     NoChecksumInLock,
 }
 
@@ -68,6 +78,15 @@ fn check_one(
         return Ok(CheckStatus::MissingLockEntry);
     };
 
+    // Verify every extra binary recorded in the lock entry is present on disk.
+    for extra in &lock_entry.extra_binaries {
+        if !bin_dir.join(extra).exists() {
+            return Ok(CheckStatus::MissingExtraBinary {
+                name: extra.clone(),
+            });
+        }
+    }
+
     if let Some(pin) = manifest_pinned_version(entry) {
         if !versions_match(pin, &lock_entry.version) {
             return Ok(CheckStatus::VersionMismatch {
@@ -92,11 +111,7 @@ fn check_one(
     }
 }
 
-fn check_one_library(
-    name: &str,
-    entry: &LibraryEntry,
-    lock: &LockFile,
-) -> CheckStatus {
+fn check_one_library(name: &str, entry: &LibraryEntry, lock: &LockFile) -> CheckStatus {
     let Some(lock_entry) = lock.get_library(name) else {
         return CheckStatus::MissingLockEntry;
     };
@@ -188,6 +203,17 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
                     out.warned.push((name.clone(), msg));
                 }
             }
+            CheckStatus::MissingExtraBinary { name: extra } => {
+                let msg = format!(
+                    "extra binary `{extra}` not found at {}",
+                    bin_dir.join(&extra).display()
+                );
+                if required {
+                    out.failed.push((name.clone(), msg));
+                } else {
+                    out.warned.push((name.clone(), msg));
+                }
+            }
             CheckStatus::MissingLockEntry => {
                 let msg = "no entry in grip.lock (run `grip install`)".to_string();
                 if required {
@@ -197,7 +223,8 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
                 }
             }
             CheckStatus::VersionMismatch { expected, locked } => {
-                let msg = format!("version mismatch: grip.toml wants {expected}, grip.lock has {locked}");
+                let msg =
+                    format!("version mismatch: grip.toml wants {expected}, grip.lock has {locked}");
                 if required {
                     out.failed.push((name.clone(), msg));
                 } else {
@@ -254,15 +281,16 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
                 }
             }
             CheckStatus::VersionMismatch { expected, locked } => {
-                let msg = format!("version mismatch: grip.toml wants {expected}, grip.lock has {locked}");
+                let msg =
+                    format!("version mismatch: grip.toml wants {expected}, grip.lock has {locked}");
                 if required {
                     out.failed.push((name.clone(), msg));
                 } else {
                     out.warned.push((name.clone(), msg));
                 }
             }
-            CheckStatus::ChecksumMismatch { .. } => {
-                // Libraries have no checksum; this branch is unreachable.
+            CheckStatus::MissingExtraBinary { .. } | CheckStatus::ChecksumMismatch { .. } => {
+                // Libraries have no extra binaries or checksums; these branches are unreachable.
                 out.passed.push(name.clone());
             }
         }
@@ -278,9 +306,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::config::lockfile::{LockEntry, LockFile};
-    use crate::config::manifest::{
-        BinaryEntry, CommonMeta, GithubEntry,
-    };
+    use crate::config::manifest::{BinaryEntry, CommonMeta, GithubEntry};
 
     // ── versions_match ────────────────────────────────────────────────────────
 
@@ -317,7 +343,9 @@ mod tests {
             url: None,
             sha256: sha256.map(String::from),
             installed_at: Utc::now(),
+            extra_binaries: vec![],
             auto_binary: None,
+            auto_extra_binaries: vec![],
         }
     }
 
@@ -327,6 +355,7 @@ mod tests {
             version: version.map(String::from),
             asset_pattern: None,
             binary: None,
+            extra_binaries: None,
             gpg_fingerprint: None,
             sig_asset_pattern: None,
             checksums_asset_pattern: None,
@@ -414,6 +443,37 @@ mod tests {
         let entry = github_entry(Some("1.7.0"));
         let status = check_one("jq", &entry, &bin_dir, &lf).unwrap();
         assert!(matches!(status, CheckStatus::Ok));
+    }
+
+    // ── check_one: MissingExtraBinary ────────────────────────────────────────
+
+    #[test]
+    fn check_one_missing_extra_binary() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join(".bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("ffmpeg"), b"stub").unwrap();
+        // ffprobe is absent
+
+        let mut lf = LockFile::default();
+        lf.upsert(LockEntry {
+            name: "ffmpeg".to_string(),
+            version: "7.0.0".to_string(),
+            source: "apt".to_string(),
+            url: None,
+            sha256: None,
+            installed_at: Utc::now(),
+            extra_binaries: vec!["ffprobe".to_string()],
+            auto_binary: None,
+            auto_extra_binaries: vec![],
+        });
+
+        let entry = github_entry(None);
+        let status = check_one("ffmpeg", &entry, &bin_dir, &lf).unwrap();
+        assert!(
+            matches!(status, CheckStatus::MissingExtraBinary { name } if name == "ffprobe"),
+            "expected MissingExtraBinary for ffprobe"
+        );
     }
 
     // ── check_one: NoChecksumInLock ───────────────────────────────────────────
