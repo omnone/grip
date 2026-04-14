@@ -627,7 +627,7 @@ fn cmd_add(
     manifest.binaries.insert(binary_name.clone(), entry);
     manifest.save(&manifest_path)?;
     if !cfg.quiet {
-        println!("Added '{}' to grip.toml", binary_name);
+        println!("Added '{}' to [binaries] in grip.toml", binary_name);
     }
     Ok(())
 }
@@ -1505,6 +1505,7 @@ async fn cmd_update_one(
 
     // Check libraries first, then binaries.
     if let Some(lib_entry) = manifest.libraries.get(&name).cloned() {
+        let old_version = lock.get_library(&name).map(|e| e.version.clone());
         let lock_entry = match &lib_entry {
             LibraryEntry::Apt(a) => {
                 crate::adapters::apt::install_apt_library(&name, a, pb, color_err).await?
@@ -1515,10 +1516,17 @@ async fn cmd_update_one(
         };
         if !cfg.quiet {
             let check = output::success_checkmark(color_err);
-            println!(
-                "\n  {check}  updated library {name} to {}",
-                lock_entry.version
-            );
+            if old_version.as_deref() == Some(lock_entry.version.as_str()) {
+                println!(
+                    "\n  {check}  library {name} is already at the latest version ({})",
+                    lock_entry.version
+                );
+            } else {
+                println!(
+                    "\n  {check}  updated library {name} to {}",
+                    lock_entry.version
+                );
+            }
         }
         lock.upsert_library(lock_entry);
         lock.save(&lock_path)?;
@@ -1530,6 +1538,8 @@ async fn cmd_update_one(
         .get(&name)
         .ok_or_else(|| GripError::Other(format!("'{name}' not found in grip.toml")))?
         .clone();
+
+    let old_version = lock.get(&name).map(|e| e.version.clone());
 
     let client = reqwest::Client::builder()
         .user_agent("grip/0.1")
@@ -1547,7 +1557,14 @@ async fn cmd_update_one(
         .await?;
     if !cfg.quiet {
         let check = output::success_checkmark(color_err);
-        println!("\n  {check}  updated {name} to {}", lock_entry.version);
+        if old_version.as_deref() == Some(lock_entry.version.as_str()) {
+            println!(
+                "\n  {check}  {name} is already at the latest version ({})",
+                lock_entry.version
+            );
+        } else {
+            println!("\n  {check}  updated {name} to {}", lock_entry.version);
+        }
     }
     lock.upsert(lock_entry);
     lock.save(&lock_path)?;
@@ -1585,6 +1602,13 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
     };
     let bin_dir = std::sync::Arc::new(bin_dir);
 
+    // Snapshot old versions so we can report "already at latest" after re-install.
+    let old_bin_versions: std::collections::HashMap<String, String> = manifest
+        .binaries
+        .keys()
+        .filter_map(|n| lock.get(n).map(|e| (n.clone(), e.version.clone())))
+        .collect();
+
     // --- binaries (concurrent) ---
     let mut bin_futs: FuturesUnordered<_> = manifest
         .binaries
@@ -1620,6 +1644,7 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
         .collect();
 
     let mut updated: Vec<String> = Vec::new();
+    let mut already_current: Vec<String> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
 
     while let Some((name, result)) = bin_futs.next().await {
@@ -1627,10 +1652,26 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
             Ok(lock_entry) => {
                 if !cfg.quiet {
                     let check = output::success_checkmark(color_err);
-                    eprintln!("  {check}  {name}  {}", lock_entry.version);
+                    let already = old_bin_versions
+                        .get(&name)
+                        .map(|v| v == &lock_entry.version)
+                        .unwrap_or(false);
+                    if already {
+                        eprintln!("  {check}  {name}  {} (already at latest)", lock_entry.version);
+                    } else {
+                        eprintln!("  {check}  {name}  {}", lock_entry.version);
+                    }
                 }
+                let already = old_bin_versions
+                    .get(&name)
+                    .map(|v| v == &lock_entry.version)
+                    .unwrap_or(false);
                 lock.upsert(lock_entry);
-                updated.push(name);
+                if already {
+                    already_current.push(name);
+                } else {
+                    updated.push(name);
+                }
             }
             Err(e) => {
                 if !cfg.quiet {
@@ -1644,6 +1685,7 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
 
     // --- libraries (sequential, need privilege) ---
     for (name, lib_entry) in &manifest.libraries {
+        let old_lib_version = lock.get_library(name).map(|e| e.version.clone());
         let pb = if cfg.quiet {
             ProgressBar::hidden()
         } else {
@@ -1668,12 +1710,24 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
         };
         match result {
             Ok(lock_entry) => {
+                let already = old_lib_version.as_deref() == Some(lock_entry.version.as_str());
                 if !cfg.quiet {
                     let check = output::success_checkmark(color_err);
-                    eprintln!("  {check}  {name}  {} (library)", lock_entry.version);
+                    if already {
+                        eprintln!(
+                            "  {check}  {name}  {} (library, already at latest)",
+                            lock_entry.version
+                        );
+                    } else {
+                        eprintln!("  {check}  {name}  {} (library)", lock_entry.version);
+                    }
                 }
                 lock.upsert_library(lock_entry);
-                updated.push(name.clone());
+                if already {
+                    already_current.push(name.clone());
+                } else {
+                    updated.push(name.clone());
+                }
             }
             Err(e) => {
                 if !cfg.quiet {
@@ -1689,14 +1743,28 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
 
     if !cfg.quiet {
         println!();
-        let n_ok = updated.len();
+        let n_updated = updated.len();
+        let n_current = already_current.len();
         let n_fail = failed.len();
         if n_fail == 0 {
-            println!("  {}", output::green(color_out, &format!("{n_ok} updated")));
+            let mut parts = Vec::new();
+            if n_updated > 0 {
+                parts.push(output::green(color_out, &format!("{n_updated} updated")));
+            }
+            if n_current > 0 {
+                parts.push(format!("{n_current} already at latest"));
+            }
+            if parts.is_empty() {
+                parts.push("nothing to update".to_string());
+            }
+            println!("  {}", parts.join(", "));
         } else {
             let mut parts = Vec::new();
-            if n_ok > 0 {
-                parts.push(output::green(color_out, &format!("{n_ok} updated")));
+            if n_updated > 0 {
+                parts.push(output::green(color_out, &format!("{n_updated} updated")));
+            }
+            if n_current > 0 {
+                parts.push(format!("{n_current} already at latest"));
             }
             parts.push(output::red(color_out, &format!("{n_fail} failed")));
             println!("  {}", parts.join(", "));

@@ -5,7 +5,7 @@ use thiserror::Error;
 /// All errors that can occur during binary management operations.
 #[derive(Debug, Error)]
 pub enum GripError {
-    #[error("IO error: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
@@ -38,10 +38,10 @@ pub enum GripError {
     #[error("Unknown source adapter: {0}")]
     UnknownAdapter(String),
     /// The current user lacks the privileges needed to run the package manager.
-    #[error("insufficient privileges: {hint}")]
+    #[error("Insufficient privileges: {hint}")]
     InsufficientPrivileges { hint: String },
     /// `gpg` binary was not found on PATH when signature verification was requested.
-    #[error("gpg not found on PATH: install gpg to verify release signatures")]
+    #[error("gpg not found on PATH")]
     GpgNotFound,
     /// GPG signature verification failed or the fingerprint did not match.
     #[error("GPG signature verification failed for '{name}': {detail}")]
@@ -74,7 +74,7 @@ impl GripError {
             GripError::UnknownAdapter(_) => Some("Valid sources: github, url, apt, dnf."),
             GripError::TomlParse(_) => Some("Fix the syntax in grip.toml."),
             GripError::ChecksumMismatch { .. } => Some(
-                "Re-run `grip install` to re-download, or update the expected hash in your manifest or lock file.",
+                "Re-run `grip sync` to re-download, or update the expected hash in your manifest or lock file.",
             ),
             GripError::NoMatchingAsset(_) => Some(
                 "Adjust `asset_pattern` in grip.toml or pin a release with assets that match this platform.",
