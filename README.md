@@ -4,7 +4,7 @@
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs/)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/omnone/grip/actions)
 
-**A per-project tool dependency manager** — like `package.json`, but for the binaries your project actually depends on.
+**A per-project tool dependency manager** — like `cargo.toml`, but for the binaries your project actually depends on.
 
 Declare your tools in `grip.toml`. Run `grip sync`.  
 That's it.
