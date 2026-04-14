@@ -6,7 +6,9 @@ use crate::config::lockfile::LockEntry;
 ///
 /// - `github` → `pkg:github/{owner}/{repo}@{version}` (repo parsed from the download URL)
 /// - `apt`    → `pkg:deb/debian/{name}@{version}`
-/// - `dnf`    → `pkg:rpm/fedora/{name}@{version}`
+/// - `dnf`    → `pkg:generic/{name}@{upstream-version}`
+///             OSV does not index Fedora RPMs; `pkg:generic` with the upstream
+///             version (dist-tag stripped) gives the best coverage.
 /// - `url` / unknown → `pkg:generic/{name}@{version}`
 ///
 /// Leading `v` is stripped from the version per the purl spec.
@@ -21,9 +23,27 @@ pub fn purl_for_entry(entry: &LockEntry) -> String {
             }
         }
         "apt" => format!("pkg:deb/debian/{}@{version}", entry.name),
-        "dnf" => format!("pkg:rpm/fedora/{}@{version}", entry.name),
+        "dnf" => format!("pkg:generic/{}@{}", entry.name, strip_rpm_release(version)),
         _ => format!("pkg:generic/{}@{version}", entry.name),
     }
+}
+
+/// Strip the RPM release and dist suffix from a version string.
+///
+/// RPM versions have the form `VERSION-RELEASE[.DIST]` where RELEASE is
+/// packaging metadata (e.g. `5.fc43`, `1.el9`).  OSV vulnerability records
+/// use only the upstream VERSION, so `8.15.0-5.fc43` → `8.15.0`.
+///
+/// Only strips when the release segment starts with a digit (the normal RPM
+/// convention), leaving upstream versions that legitimately contain `-` alone.
+pub fn strip_rpm_release(version: &str) -> &str {
+    if let Some(idx) = version.rfind('-') {
+        let release = &version[idx + 1..];
+        if release.starts_with(|c: char| c.is_ascii_digit()) {
+            return &version[..idx];
+        }
+    }
+    version
 }
 
 /// Parse `owner` and `repo` from a GitHub release download URL.
@@ -97,9 +117,35 @@ mod tests {
     }
 
     #[test]
-    fn dnf_purl() {
+    fn dnf_purl_uses_generic_and_strips_dist_tag() {
+        let e = entry("curl", "8.15.0-5.fc43", "dnf", None);
+        assert_eq!(purl_for_entry(&e), "pkg:generic/curl@8.15.0");
+    }
+
+    #[test]
+    fn dnf_purl_bare_version_unchanged() {
         let e = entry("openssl-devel", "3.0.7", "dnf", None);
-        assert_eq!(purl_for_entry(&e), "pkg:rpm/fedora/openssl-devel@3.0.7");
+        assert_eq!(purl_for_entry(&e), "pkg:generic/openssl-devel@3.0.7");
+    }
+
+    #[test]
+    fn strip_rpm_release_strips_dist_tag() {
+        assert_eq!(strip_rpm_release("8.15.0-5.fc43"), "8.15.0");
+        assert_eq!(strip_rpm_release("14.1.1-3.fc43"), "14.1.1");
+        assert_eq!(strip_rpm_release("9.1.2114-1.fc43"), "9.1.2114");
+        assert_eq!(strip_rpm_release("3.0.7-2.el9"), "3.0.7");
+    }
+
+    #[test]
+    fn strip_rpm_release_leaves_bare_version_alone() {
+        assert_eq!(strip_rpm_release("8.15.0"), "8.15.0");
+        assert_eq!(strip_rpm_release("1.7.1"), "1.7.1");
+    }
+
+    #[test]
+    fn strip_rpm_release_leaves_non_digit_release_alone() {
+        // upstream versions like "1.0-beta" should not be stripped
+        assert_eq!(strip_rpm_release("1.0-beta"), "1.0-beta");
     }
 
     #[test]
