@@ -40,11 +40,6 @@ pub enum GripError {
     /// The current user lacks the privileges needed to run the package manager.
     #[error("insufficient privileges: {hint}")]
     InsufficientPrivileges { hint: String },
-    /// Shell install is blocked because `allow_shell` is not explicitly set to `true`.
-    #[error(
-        "shell install for '{name}' is blocked: `allow_shell` is not set to true in grip.toml"
-    )]
-    ShellNotAllowed { name: String },
     /// `gpg` binary was not found on PATH when signature verification was requested.
     #[error("gpg not found on PATH: install gpg to verify release signatures")]
     GpgNotFound,
@@ -76,7 +71,7 @@ impl GripError {
             GripError::ManifestNotFound => Some(
                 "Run `grip init` in your project directory, or change to a directory that contains grip.toml.",
             ),
-            GripError::UnknownAdapter(_) => Some("Valid sources: github, url, apt, dnf, shell."),
+            GripError::UnknownAdapter(_) => Some("Valid sources: github, url, apt, dnf."),
             GripError::TomlParse(_) => Some("Fix the syntax in grip.toml."),
             GripError::ChecksumMismatch { .. } => Some(
                 "Re-run `grip install` to re-download, or update the expected hash in your manifest or lock file.",
@@ -93,10 +88,6 @@ impl GripError {
             GripError::GitHubApi(_) => Some("Check the repository name, release tags, and your network access."),
             GripError::InsufficientPrivileges { .. } => Some(
                 "Run grip as root, or configure passwordless sudo for apt-get/dnf.",
-            ),
-            GripError::ShellNotAllowed { .. } => Some(
-                "Review install_cmd in grip.toml, then add `allow_shell = true` to the entry to permit execution. \
-                 Use `grip add --source shell --allow-shell` to set this flag when adding the entry.",
             ),
             GripError::GpgNotFound => Some(
                 "Install gpg (e.g. `apt install gnupg` or `brew install gnupg`) \
@@ -209,23 +200,6 @@ mod tests {
     #[test]
     fn command_failed_has_hint() {
         assert!(GripError::CommandFailed("exit 1".into()).hint().is_some());
-    }
-
-    #[test]
-    fn shell_not_allowed_has_hint() {
-        assert!(GripError::ShellNotAllowed {
-            name: "mytool".into()
-        }
-        .hint()
-        .is_some());
-    }
-
-    #[test]
-    fn shell_not_allowed_message_contains_name() {
-        let err = GripError::ShellNotAllowed {
-            name: "mytool".into(),
-        };
-        assert!(err.to_string().contains("mytool"));
     }
 
     #[test]

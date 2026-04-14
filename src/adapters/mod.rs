@@ -1,4 +1,4 @@
-//! Source adapters — one per installation method (apt, brew, dnf, github, url, shell).
+//! Source adapters — one per installation method (apt, dnf, github, url).
 
 use async_trait::async_trait;
 use indicatif::ProgressBar;
@@ -15,7 +15,6 @@ use crate::platform::Platform;
 pub mod apt;
 pub mod dnf;
 pub mod github;
-pub mod shell;
 pub mod url;
 
 /// Common interface implemented by every source adapter.
@@ -53,6 +52,5 @@ pub fn get_adapter(entry: &BinaryEntry, cache: Option<Arc<Cache>>) -> Box<dyn So
         BinaryEntry::Dnf(_) => Box::new(dnf::DnfAdapter { platform }),
         BinaryEntry::Github(_) => Box::new(github::GithubAdapter { platform, cache }),
         BinaryEntry::Url(_) => Box::new(url::UrlAdapter { cache }),
-        BinaryEntry::Shell(_) => Box::new(shell::ShellAdapter),
     }
 }

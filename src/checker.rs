@@ -59,7 +59,6 @@ fn manifest_pinned_version(entry: &BinaryEntry) -> Option<&str> {
         BinaryEntry::Dnf(d) => d.version.as_deref(),
         BinaryEntry::Github(g) => g.version.as_deref(),
         BinaryEntry::Url(_) => None,
-        BinaryEntry::Shell(s) => s.version.as_deref(),
     }
 }
 
@@ -543,38 +542,5 @@ jq = { source = "github", repo = "jqlang/jq", version = "1.7.1", required = fals
         let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
         assert!(result.failed.is_empty());
         assert_eq!(result.warned.len(), 1);
-    }
-
-    #[test]
-    fn run_check_shell_entry_without_version_accepts_any_lock_version() {
-        let tmp = TempDir::new().unwrap();
-        let toml = r#"
-[binaries]
-mytool = { source = "shell", install_cmd = "echo hi" }
-"#;
-        std::fs::write(tmp.path().join("grip.toml"), toml).unwrap();
-
-        // Create .bin/mytool
-        let bin_dir = tmp.path().join(".bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let content = b"stub";
-        std::fs::write(bin_dir.join("mytool"), content).unwrap();
-        let sha = crate::checksum::sha256_file(&bin_dir.join("mytool")).unwrap();
-
-        // Write grip.lock with matching sha
-        let lock_toml = format!(
-            r#"[[binary]]
-name = "mytool"
-version = "any"
-source = "shell"
-sha256 = "{sha}"
-installed_at = "2024-01-01T00:00:00Z"
-"#
-        );
-        std::fs::write(tmp.path().join("grip.lock"), lock_toml).unwrap();
-
-        let result = run_check(None, Some(tmp.path().to_path_buf())).unwrap();
-        assert!(result.failed.is_empty());
-        assert_eq!(result.passed.len(), 1);
     }
 }

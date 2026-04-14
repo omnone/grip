@@ -63,7 +63,6 @@ pub enum BinaryEntry {
     Dnf(DnfEntry),
     Github(GithubEntry),
     Url(UrlEntry),
-    Shell(ShellEntry),
 }
 
 /// Entry installed via `dnf` (Fedora / RHEL).
@@ -165,26 +164,6 @@ pub struct UrlEntry {
     pub meta: CommonMeta,
 }
 
-/// Entry installed by running an arbitrary shell command.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ShellEntry {
-    /// Shell command passed to `sh -c`. The `GRIP_BIN_DIR` environment variable is set to the
-    /// project's `.bin/` directory so the script can place the binary there.
-    pub install_cmd: String,
-    pub version: Option<String>,
-    /// Must be explicitly set to `true` before grip will execute the shell command.
-    /// Protects against arbitrary code execution if `grip.toml` is compromised (e.g. via a
-    /// malicious PR). Omitting this field or setting it to `false` blocks execution and
-    /// surfaces a clear error pointing to this field.
-    #[serde(default)]
-    pub allow_shell: bool,
-    /// Additional binary names placed in `.bin/` by the install script.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra_binaries: Option<Vec<String>>,
-    #[serde(flatten)]
-    pub meta: CommonMeta,
-}
-
 impl BinaryEntry {
     /// Return a clone with the version field pinned to `version`.
     /// For system adapters (apt/dnf) this sets the package version field.
@@ -205,10 +184,6 @@ impl BinaryEntry {
                 ..g.clone()
             }),
             BinaryEntry::Url(u) => BinaryEntry::Url(u.clone()),
-            BinaryEntry::Shell(s) => BinaryEntry::Shell(ShellEntry {
-                version: Some(version.to_string()),
-                ..s.clone()
-            }),
         }
     }
 
@@ -219,7 +194,6 @@ impl BinaryEntry {
             BinaryEntry::Dnf(e) => &e.meta,
             BinaryEntry::Github(e) => &e.meta,
             BinaryEntry::Url(e) => &e.meta,
-            BinaryEntry::Shell(e) => &e.meta,
         }
     }
 
@@ -230,7 +204,6 @@ impl BinaryEntry {
             BinaryEntry::Dnf(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
             BinaryEntry::Github(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
             BinaryEntry::Url(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
-            BinaryEntry::Shell(e) => e.extra_binaries.as_deref().unwrap_or(&[]),
         }
     }
 
@@ -248,7 +221,6 @@ impl BinaryEntry {
             BinaryEntry::Dnf(d) => d.version.is_some(),
             BinaryEntry::Github(g) => g.version.is_some(),
             BinaryEntry::Url(_) => true,
-            BinaryEntry::Shell(s) => s.version.is_some(),
         }
     }
 
@@ -259,7 +231,6 @@ impl BinaryEntry {
             BinaryEntry::Dnf(_) => "dnf",
             BinaryEntry::Github(_) => "github",
             BinaryEntry::Url(_) => "url",
-            BinaryEntry::Shell(_) => "shell",
         }
     }
 }
@@ -520,23 +491,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pin_version_shell() {
-        let entry = BinaryEntry::Shell(ShellEntry {
-            install_cmd: "echo hi".to_string(),
-            version: None,
-            allow_shell: false,
-            extra_binaries: None,
-            meta: CommonMeta::default(),
-        });
-        let pinned = entry.pin_version("0.1.0");
-        if let BinaryEntry::Shell(s) = pinned {
-            assert_eq!(s.version.as_deref(), Some("0.1.0"));
-        } else {
-            panic!("expected Shell entry");
-        }
-    }
-
     // ── BinaryEntry::meta ─────────────────────────────────────────────────────
 
     #[test]
@@ -643,30 +597,6 @@ mod tests {
             meta: CommonMeta::default(),
         });
         assert!(entry.is_version_pinned());
-    }
-
-    #[test]
-    fn shell_entry_pinned_when_version_set() {
-        let entry = BinaryEntry::Shell(ShellEntry {
-            install_cmd: "echo hi".to_string(),
-            version: Some("2.0".to_string()),
-            allow_shell: true,
-            extra_binaries: None,
-            meta: CommonMeta::default(),
-        });
-        assert!(entry.is_version_pinned());
-    }
-
-    #[test]
-    fn shell_entry_unpinned_when_no_version() {
-        let entry = BinaryEntry::Shell(ShellEntry {
-            install_cmd: "curl ... | sh".to_string(),
-            version: None,
-            allow_shell: true,
-            extra_binaries: None,
-            meta: CommonMeta::default(),
-        });
-        assert!(!entry.is_version_pinned());
     }
 
     // ── BinaryEntry::source_label ─────────────────────────────────────────────

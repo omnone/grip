@@ -83,10 +83,10 @@ $ grip check
 - **Byte-for-byte reproducibility** — `grip.lock` records the exact version, download URL, and SHA-256 of every installed binary. `grip sync --locked` fails CI if the lock would change.
 - **No global pollution** — tools land in `.bin/` at the project root; nothing touches `/usr/local/bin` or any system directory.
 - **Fast, cached installs** — a local download cache avoids re-fetching archives on every run. Concurrent installs for download-based sources.
-- **Mixed sources in one file** — GitHub Releases, direct URLs, APT, DNF, and custom shell scripts all declared in a single `grip.toml`. Shell installs record a SHA-256 checksum of the placed binary so `grip check` can verify them.
+- **Mixed sources in one file** — GitHub Releases, direct URLs, APT, and DNF all declared in a single `grip.toml`.
 - **Docker-native export** — `grip export --format dockerfile` generates lock-file-accurate `RUN` instructions, so your images don't need grip installed at build time.
 - **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
-- **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `allow_shell` opt-in guard for shell installs, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
+- **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -96,7 +96,7 @@ $ grip check
 |---------|:----:|:---------------:|:----:|:-----------:|
 | Per-project isolation | ✓ | ✓ | ✗ global | ✓ |
 | Lockfile with SHA-256 | ✓ | ✗ | partial | ✗ |
-| GitHub, URL, APT, DNF, shell | ✓ | manual | ✗ | via plugins |
+| GitHub, URL, APT, DNF | ✓ | manual | ✗ | via plugins |
 | Docker export (no grip in image) | ✓ | ✗ | ✗ | ✗ |
 | System library packages | ✓ | ✗ | ✗ | ✗ |
 | Semver ranges | ✓ | ✗ | ✓ | ✗ |
@@ -104,7 +104,6 @@ $ grip check
 | CI mode — fail on lock drift | ✓ `--locked` | ✗ | ✗ | ✗ |
 | CI mode — fail on unpinned versions | ✓ `--require-pins` | ✗ | ✗ | ✗ |
 | GPG signature verification | ✓ | ✗ | ✗ | ✗ |
-| Shell install opt-in guard | ✓ `allow_shell` | ✗ | ✗ | ✗ |
 | Post-install tamper detection | ✓ `grip lock verify` | ✗ | ✗ | ✗ |
 | Zero setup for consumers | ✓ `grip sync` | ✓ | requires brew | requires asdf |
 
@@ -152,11 +151,6 @@ binary  = "rg"            # on-PATH command differs from the package name
 source          = "apt"
 package         = "ffmpeg"
 extra_binaries  = ["ffprobe", "ffplay"]  # additional binaries installed by the same package
-
-[binaries.mytool]
-source      = "shell"
-install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
-version     = "1.0"       # metadata; SHA-256 of the installed binary is recorded automatically
 
 [libraries.libssl-dev]
 source  = "apt"
@@ -234,7 +228,6 @@ grip --version
 
 grip includes layered supply chain attack protections:
 
-- **Shell installs blocked by default** — `allow_shell = true` must be explicitly set, and grip shows the command and prompts for confirmation before running it.
 - **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry; grip verifies the release asset signature before installing (direct `.sig`/`.asc` or signed `SHA256SUMS` file).
 - **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading.
 - **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".

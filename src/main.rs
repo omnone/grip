@@ -25,7 +25,7 @@ use cli::{CacheAction, Cli, Commands, LockAction};
 use config::lockfile::LockFile;
 use config::manifest::{
     find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry, LibDnfEntry,
-    LibraryEntry, Manifest, ShellEntry, UrlEntry,
+    LibraryEntry, Manifest, UrlEntry,
 };
 use error::GripError;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -62,8 +62,6 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             package,
             binary,
             library,
-            cmd,
-            allow_shell,
             gpg_fingerprint,
             sig_asset_pattern,
             checksums_asset_pattern,
@@ -81,8 +79,6 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 package,
                 binary,
                 library,
-                cmd,
-                allow_shell,
                 gpg_fingerprint,
                 sig_asset_pattern,
                 checksums_asset_pattern,
@@ -95,8 +91,6 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
                 colored: color_err,
-                // User already saw and typed the command; skip the prompt.
-                yes: allow_shell,
                 require_pins: false,
             };
             let start = std::time::Instant::now();
@@ -161,14 +155,12 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             locked,
             verify,
             tag,
-            yes,
             require_pins,
         } => {
             let start = std::time::Instant::now();
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
                 colored: color_err,
-                yes,
                 require_pins,
             };
             let result = installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
@@ -442,8 +434,6 @@ fn cmd_add(
     package: Option<String>,
     binary: Option<String>,
     library: bool,
-    cmd: Option<String>,
-    allow_shell: bool,
     gpg_fingerprint: Option<String>,
     sig_asset_pattern: Option<String>,
     checksums_asset_pattern: Option<String>,
@@ -563,7 +553,9 @@ fn cmd_add(
         }),
         "github" => BinaryEntry::Github(GithubEntry {
             repo: repo_resolved.ok_or_else(|| {
-                GripError::Other("--repo required for github source (or use `grip add owner/repo`)".into())
+                GripError::Other(
+                    "--repo required for github source (or use `grip add owner/repo`)".into(),
+                )
             })?,
             version,
             asset_pattern: None,
@@ -585,32 +577,13 @@ fn cmd_add(
             checksums_sig_url,
             meta: Default::default(),
         }),
-        "shell" => BinaryEntry::Shell(ShellEntry {
-            install_cmd: cmd.ok_or_else(|| {
-                GripError::Other(
-                    "--cmd is required for shell source \
-                     (e.g. `grip add mytool --source shell --cmd 'curl -fsSL ... -o $GRIP_BIN_DIR/mytool'`)"
-                        .into(),
-                )
-            })?,
-            version,
-            allow_shell,
-            extra_binaries: None,
-            meta: Default::default(),
-        }),
         other => return Err(GripError::UnknownAdapter(other.to_string())),
     };
 
-    manifest.binaries.insert(binary_name.clone(), entry.clone());
+    manifest.binaries.insert(binary_name.clone(), entry);
     manifest.save(&manifest_path)?;
     if !cfg.quiet {
         println!("Added '{}' to grip.toml", binary_name);
-        if matches!(&entry, BinaryEntry::Shell(s) if !s.allow_shell) {
-            eprintln!(
-                "warning: shell install for '{binary_name}' is blocked until you set \
-                 `allow_shell = true` in grip.toml (or re-run with --allow-shell)."
-            );
-        }
     }
     Ok(())
 }
@@ -742,7 +715,7 @@ fn detect_default_source() -> Result<String, GripError> {
     }
     Err(GripError::Other(
         "no native package manager found; use --source github to add a GitHub binary, \
-         or --source url / --source shell for other sources"
+         or --source url for direct-download binaries"
             .into(),
     ))
 }
@@ -790,7 +763,6 @@ fn cmd_list(root: Option<std::path::PathBuf>, all: bool, cfg: &OutputCfg) -> Res
                     BinaryEntry::Dnf(_) => "dnf",
                     BinaryEntry::Github(_) => "github",
                     BinaryEntry::Url(_) => "url",
-                    BinaryEntry::Shell(_) => "shell",
                 };
                 if let Some(lock_entry) = lock.get(name) {
                     println!(
@@ -1288,7 +1260,7 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
 
     // 8. Binary lock entry missing sha256 for sources that always record one.
     //    This can indicate the lock file was hand-edited to remove integrity data.
-    const SHA256_SOURCES: &[&str] = &["github", "url", "shell"];
+    const SHA256_SOURCES: &[&str] = &["github", "url"];
     for entry in &lock.entries {
         if entry.sha256.is_none() && SHA256_SOURCES.contains(&entry.source.as_str()) {
             issues.push(format!(
@@ -1746,7 +1718,6 @@ fn cmd_export(
     let mut dnf_pkgs: Vec<String> = Vec::new();
     // (name, url) for curl-based installs
     let mut curl_installs: Vec<(String, String)> = Vec::new();
-    let mut shell_entries: Vec<(String, String)> = Vec::new();
 
     for (name, entry) in &manifest.binaries {
         match entry {
@@ -1787,9 +1758,6 @@ fn cmd_export(
             }
             BinaryEntry::Url(u) => {
                 curl_installs.push((name.clone(), u.url.clone()));
-            }
-            BinaryEntry::Shell(s) => {
-                shell_entries.push((name.clone(), s.install_cmd.clone()));
             }
         }
     }
@@ -1840,9 +1808,6 @@ fn cmd_export(
                 println!("RUN curl -fsSL -o /usr/local/bin/{name} \\\n    \"{url}\" \\");
                 println!("    && chmod +x /usr/local/bin/{name}");
             }
-            for (name, cmd) in &shell_entries {
-                println!("# shell entry '{name}': {cmd}");
-            }
         }
         "makefile" => {
             println!("# Generated by grip export --format makefile");
@@ -1861,12 +1826,9 @@ fn cmd_export(
             for (name, url) in &curl_installs {
                 println!("\tcurl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
             }
-            for (name, cmd) in &shell_entries {
-                println!("\t# shell entry '{name}': {cmd}");
-            }
         }
         _ => {
-            // default: shell
+            // default: shell script
             println!("#!/bin/sh");
             println!("# Generated by grip export --format shell");
             println!("set -eu");
@@ -1883,9 +1845,6 @@ fn cmd_export(
             }
             for (name, url) in &curl_installs {
                 println!("curl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
-            }
-            for (name, cmd) in &shell_entries {
-                println!("# shell entry '{name}': {cmd}");
             }
         }
     }
@@ -1949,117 +1908,6 @@ mod tests {
         let (stem, ver) = parse_name_at_version("jq@".into());
         assert_eq!(stem, "jq");
         assert!(ver.is_none());
-    }
-
-    // ── cmd_add: shell source validation ─────────────────────────────────────
-
-    #[test]
-    fn cmd_add_shell_without_cmd_is_an_error() {
-        let tmp = TempDir::new().unwrap();
-        let result = cmd_add(
-            "mytool".into(),
-            Some("shell".into()),
-            None,  // version
-            None,  // repo
-            None,  // url
-            None,  // package
-            None,  // binary
-            false, // library
-            None,  // cmd ← intentionally omitted
-            false, // allow_shell
-            None,  // gpg_fingerprint
-            None,  // sig_asset_pattern
-            None,  // checksums_asset_pattern
-            None,  // sig_url
-            None,  // signed_checksums_url
-            None,  // checksums_sig_url
-            Some(tmp.path().to_path_buf()),
-            &silent_cfg(),
-        );
-        assert!(result.is_err(), "expected an error when --cmd is missing");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("--cmd"),
-            "error message should mention --cmd, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn cmd_add_shell_with_cmd_writes_entry_to_manifest() {
-        let tmp = TempDir::new().unwrap();
-        let result = cmd_add(
-            "mytool".into(),
-            Some("shell".into()),
-            Some("1.0.0".into()), // version
-            None,
-            None,
-            None,
-            None,
-            false,
-            Some("echo install > $GRIP_BIN_DIR/mytool".into()), // cmd ← provided
-            false,                                              // allow_shell
-            None,                                               // gpg_fingerprint
-            None,                                               // sig_asset_pattern
-            None,                                               // checksums_asset_pattern
-            None,                                               // sig_url
-            None,                                               // signed_checksums_url
-            None,                                               // checksums_sig_url
-            Some(tmp.path().to_path_buf()),
-            &silent_cfg(),
-        );
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-
-        let manifest_path = tmp.path().join("grip.toml");
-        assert!(manifest_path.exists(), "grip.toml should have been created");
-
-        let manifest = config::manifest::Manifest::load(&manifest_path).unwrap();
-        let entry = manifest
-            .binaries
-            .get("mytool")
-            .expect("mytool should be in [binaries]");
-        if let config::manifest::BinaryEntry::Shell(s) = entry {
-            assert_eq!(s.install_cmd, "echo install > $GRIP_BIN_DIR/mytool");
-            assert_eq!(s.version.as_deref(), Some("1.0.0"));
-            assert!(!s.allow_shell, "allow_shell should default to false");
-        } else {
-            panic!("expected a Shell entry");
-        }
-    }
-
-    #[test]
-    fn cmd_add_shell_with_allow_shell_flag_sets_true() {
-        let tmp = TempDir::new().unwrap();
-        let result = cmd_add(
-            "mytool".into(),
-            Some("shell".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            Some("echo hi".into()),
-            true, // allow_shell = true
-            None, // gpg_fingerprint
-            None, // sig_asset_pattern
-            None, // checksums_asset_pattern
-            None, // sig_url
-            None, // signed_checksums_url
-            None, // checksums_sig_url
-            Some(tmp.path().to_path_buf()),
-            &silent_cfg(),
-        );
-        assert!(result.is_ok());
-        let manifest = config::manifest::Manifest::load(&tmp.path().join("grip.toml")).unwrap();
-        let entry = manifest.binaries.get("mytool").unwrap();
-        if let config::manifest::BinaryEntry::Shell(s) = entry {
-            assert!(
-                s.allow_shell,
-                "allow_shell should be true when --allow-shell is passed"
-            );
-        } else {
-            panic!("expected a Shell entry");
-        }
     }
 
     // ── cmd_remove ────────────────────────────────────────────────────────────

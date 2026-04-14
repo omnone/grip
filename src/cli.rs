@@ -62,7 +62,7 @@ pub enum Commands {
     Add {
         /// Binary name, or `owner/repo` for GitHub, optionally `name@version`
         name: String,
-        #[arg(long, help = "github | url | apt | dnf | shell (default: OS-specific)")]
+        #[arg(long, help = "github | url | apt | dnf (default: OS-specific)")]
         source: Option<String>,
         #[arg(long)]
         version: Option<String>,
@@ -82,15 +82,6 @@ pub enum Commands {
         binary: Option<String>,
         #[arg(long, help = "Add to [libraries] instead of [binaries] (apt/dnf only)")]
         library: bool,
-        #[arg(
-            long,
-            value_name = "CMD",
-            help = "Shell command to run for --source shell (required for that source)"
-        )]
-        cmd: Option<String>,
-        /// Set allow_shell = true in the manifest entry (required to run shell installs)
-        #[arg(long)]
-        allow_shell: bool,
         /// GPG key fingerprint (or long key ID) to verify GitHub/URL release signatures
         #[arg(long, value_name = "FINGERPRINT")]
         gpg_fingerprint: Option<String>,
@@ -123,9 +114,6 @@ pub enum Commands {
         /// Only install entries that include this tag
         #[arg(long)]
         tag: Option<String>,
-        /// Skip the interactive confirmation prompt for shell installs
-        #[arg(long)]
-        yes: bool,
         /// Fail if any entry in grip.toml has no version pin (for CI; prevents silent auto-upgrades)
         #[arg(long)]
         require_pins: bool,

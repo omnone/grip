@@ -1,6 +1,6 @@
 # grip — Security Guide
 
-grip is designed to protect projects from supply chain attacks: compromised upstream releases, tampered binaries, and accidental execution of unreviewed shell code. This document explains every security control, when to use each one, and the recommended CI setup.
+grip is designed to protect projects from supply chain attacks: compromised upstream releases and tampered binaries. This document explains every security control, when to use each one, and the recommended CI setup.
 
 ---
 
@@ -12,62 +12,13 @@ grip defends against the following scenarios:
 |--------|---------|
 | Compromised upstream release (tampered binary) | GPG signature verification, SHA-256 checksums |
 | Binary swapped on disk after install | `grip lock verify`, `grip doctor` SHA256 drift check |
-| Malicious PR adds a shell `install_cmd` | `allow_shell` opt-in guard + interactive prompt |
 | Silent auto-upgrade to a compromised release | `--require-pins`, `grip doctor` unpinned entry warning |
 | Lock file hand-edited to remove hash checks | `grip doctor` missing-sha256 warning |
 | Cleartext MITM on download | HTTPS enforced by reqwest; `sha256` field in `grip.toml` |
 
 ---
 
-## 1. Shell install opt-in (`allow_shell`)
-
-Shell entries run arbitrary code on your machine. grip blocks them by default.
-
-### How it works
-
-Every `[binaries.<name>]` entry with `source = "shell"` requires an explicit `allow_shell = true` before grip will execute the `install_cmd`. Without it, `grip sync` exits with an error and a hint explaining which field to set.
-
-```toml
-[binaries.mytool]
-source      = "shell"
-install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
-version     = "1.0"
-allow_shell = true      # must be explicitly present and true
-```
-
-When `allow_shell` is absent or `false`, grip prints:
-
-```
-error: shell install for 'mytool' is blocked: `allow_shell` is not set to true in grip.toml
-hint:  Review install_cmd in grip.toml, then add `allow_shell = true` ...
-```
-
-### Interactive prompt
-
-Even when `allow_shell = true`, grip shows the `install_cmd` and asks for confirmation before running it when a TTY is attached:
-
-```
-  Shell install for 'mytool':
-    sh -c "curl -fsSL https://example.com/install.sh | bash -s -- --dir .bin/"
-  Allow execution? [y/N]
-```
-
-Reject with `n` (or press Enter) to skip the entry. Use `--yes` to suppress the prompt in automation.
-
-### Adding shell entries safely
-
-```sh
-grip add mytool --source shell \
-  --cmd 'curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR' \
-  --version 1.0 \
-  --allow-shell
-```
-
-Without `--allow-shell`, grip adds the entry with `allow_shell` omitted and prints a warning reminding you to review and set it.
-
----
-
-## 2. GPG signature verification
+## 1. GPG signature verification
 
 grip can verify GPG signatures on GitHub release assets and direct-URL downloads before installing the binary.
 
@@ -173,7 +124,7 @@ gpg --fingerprint <keyid>
 
 ---
 
-## 3. Lock file integrity (`grip lock verify`)
+## 2. Lock file integrity (`grip lock verify`)
 
 After install, grip records the SHA-256 of every downloaded binary in `grip.lock`. `grip lock verify` re-hashes every `.bin/` binary and compares it against the lock — without re-downloading anything.
 
@@ -223,7 +174,7 @@ Exits `1` if any binary fails. Suitable for CI.
 
 ---
 
-## 4. Version pins and `--require-pins`
+## 3. Version pins and `--require-pins`
 
 An entry with no `version` pin silently upgrades to whatever is latest on every `grip sync`. If an upstream release is ever compromised, an unpinned entry picks it up automatically.
 
@@ -257,19 +208,18 @@ hint:  Pin each entry by adding a version: `grip add <name>@<version>`, ...
 | `github` | `version = "x.y.z"` is set |
 | `apt` | `version = "x.y"` is set |
 | `dnf` | `version = "x.y"` is set |
-| `shell` | `version = "x.y"` is set |
 | `url` | always — the URL itself is the pin |
 
 ---
 
-## 5. `grip doctor` security checks
+## 4. `grip doctor` security checks
 
 `grip doctor` reports the following security-relevant issues in addition to consistency checks:
 
 | Check | What it detects |
 |-------|----------------|
 | SHA256 drift (check 6) | Binary on disk doesn't match the hash in `grip.lock` — may indicate post-install tampering |
-| Missing sha256 in lock (check 8) | A `github`, `url`, or `shell` entry has no sha256 recorded — lock may have been hand-edited |
+| Missing sha256 in lock (check 8) | A `github` or `url` entry has no sha256 recorded — lock may have been hand-edited |
 | Unpinned entries (check 10) | An entry has no version pin — silent auto-upgrade risk in CI |
 
 Run after `git pull` or as part of a pre-commit hook:

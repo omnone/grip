@@ -3,8 +3,6 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Client;
-use std::io::IsTerminal;
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,9 +23,6 @@ use crate::platform::Platform;
 pub struct InstallOptions {
     pub quiet: bool,
     pub colored: bool,
-    /// Skip the interactive confirmation prompt for shell installs.
-    /// Has no effect on entries with `allow_shell = false` — those are always blocked.
-    pub yes: bool,
     /// Fail before installing if any entry has no version pin.
     /// Prevents silent auto-upgrades in CI.
     pub require_pins: bool,
@@ -175,7 +170,7 @@ pub async fn run_install(
     }
 
     // Split into system PM installs (apt/dnf — must be sequential to avoid lock contention)
-    // and download-based installs (github/url/shell — safe to run concurrently).
+    // and download-based installs (github/url — safe to run concurrently).
     let mut pm_installs: Vec<(String, _, Option<String>)> = Vec::new();
     let mut download_installs: Vec<(String, _, Option<String>)> = Vec::new();
     for item in to_install {
@@ -183,49 +178,6 @@ pub async fn run_install(
             crate::config::manifest::BinaryEntry::Apt(_)
             | crate::config::manifest::BinaryEntry::Dnf(_) => pm_installs.push(item),
             _ => download_installs.push(item),
-        }
-    }
-
-    // ── Shell install confirmation ──────────────────────────────────────────
-    // When running interactively (TTY stdin) and the user has not passed --yes,
-    // display each pending shell command and ask for explicit per-entry approval.
-    // Entries with `allow_shell = false` are blocked entirely by the adapter;
-    // this prompt is a second layer for entries that already have `allow_shell = true`.
-    if !ui.yes && std::io::stdin().is_terminal() {
-        let mut rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (name, entry, _) in &download_installs {
-            if let crate::config::manifest::BinaryEntry::Shell(s) = entry {
-                if s.allow_shell {
-                    use std::io::Write;
-                    eprintln!(
-                        "\nwarning: '{name}' will run a shell command:\n  {}\n",
-                        s.install_cmd
-                    );
-                    eprint!("  Allow execution? [y/N] ");
-                    std::io::stderr().flush().ok();
-                    let mut input = String::new();
-                    if std::io::stdin().read_line(&mut input).is_ok()
-                        && !input.trim().eq_ignore_ascii_case("y")
-                    {
-                        rejected.insert(name.clone());
-                    }
-                }
-            }
-        }
-        if !rejected.is_empty() {
-            download_installs.retain(|(name, _, _)| !rejected.contains(name));
-            for name in rejected {
-                let required = required_flags.get(&name).copied().unwrap_or(true);
-                if required {
-                    outcome
-                        .failed
-                        .push((name, "shell install rejected by user".to_string()));
-                } else {
-                    outcome
-                        .warned
-                        .push((name, "shell install rejected by user".to_string()));
-                }
-            }
         }
     }
 
@@ -608,7 +560,6 @@ mod tests {
         InstallOptions {
             quiet: true,
             colored: false,
-            yes: false,
             require_pins,
         }
     }

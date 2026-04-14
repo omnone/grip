@@ -31,21 +31,17 @@ grip add BurntSushi/ripgrep                         # GitHub Releases shorthand
 grip add jq@1.7.1 --repo jqlang/jq --source github  # pin a version
 grip add libssl-dev --library                        # system library (no executable)
 grip add mytool --source url --url https://example.com/mytool.tar.gz
-grip add mytool --source shell --allow-shell \
-  --cmd 'curl -fsSL https://example.com/install.sh | sh -s -- --dir $GRIP_BIN_DIR'
 ```
 
 | Flag | Description |
 |---|---|
-| `--source <src>` | `github`, `url`, `apt`, `dnf`, `shell` (default: OS-specific) |
+| `--source <src>` | `github`, `url`, `apt`, `dnf` (default: OS-specific) |
 | `--version <ver>` | Pin a specific version |
 | `--repo <owner/repo>` | GitHub repo (required for `--source github` unless using `owner/repo` shorthand) |
 | `--url <url>` | Download URL (required for `--source url`) |
 | `--package <pkg>` | Package name for apt/dnf (defaults to binary name) |
 | `--binary <cmd>` | On-PATH command for apt/dnf when it differs from NAME (e.g. `rg` for `ripgrep`) |
 | `--library` | Add to `[libraries]` instead of `[binaries]` (apt/dnf only; no executable required) |
-| `--cmd <CMD>` | Shell command to run for `--source shell` (required for that source; `$GRIP_BIN_DIR` is set) |
-| `--allow-shell` | Set `allow_shell = true` on the new shell entry (required to run shell installs) |
 | `--gpg-fingerprint <FP>` | GPG key fingerprint to verify GitHub/URL release signatures |
 | `--sig-asset-pattern <GLOB>` | Glob to find the detached signature asset in a GitHub release (e.g. `"*.asc"`); auto-detected if omitted |
 | `--checksums-asset-pattern <GLOB>` | Glob to find a signed checksums file in a GitHub release (e.g. `"*SHA256SUMS"`); activates signed-checksums verification |
@@ -67,7 +63,6 @@ grip sync --locked                  # CI mode: fail if lock would change
 grip sync --locked --require-pins   # also fail if any entry has no version pin
 grip sync --tag dev                 # only entries tagged "dev"
 grip sync --verify                  # re-verify SHA256 of already-installed binaries
-grip sync --yes                     # skip interactive confirmation for shell installs
 ```
 
 | Flag | Description |
@@ -76,7 +71,6 @@ grip sync --yes                     # skip interactive confirmation for shell in
 | `--verify` | Re-check SHA256 of on-disk binaries against `grip.lock` |
 | `--tag <tag>` | Only install entries that carry this tag |
 | `--require-pins` | Fail before touching the network if any entry has no version pin (prevents silent auto-upgrades in CI) |
-| `--yes` | Skip the interactive confirmation prompt for shell installs |
 
 ---
 
@@ -104,7 +98,7 @@ Fetches the latest available version for every declared binary and shows a compa
 - **GitHub** entries: queries the GitHub Releases API.
 - **apt** entries: queries `apt-cache policy` for the repository candidate version.
 - **dnf** entries: queries `dnf info` for the latest available version.
-- **url / shell** entries: compares the lock version against the manifest pin; no network query.
+- **url** entries: compares the lock version against the manifest pin; no network query.
 
 ```sh
 grip outdated
@@ -131,7 +125,7 @@ grip update --all            # update every entry in grip.toml concurrently
 |---|---|
 | `--all` | Update every binary and library declared in `grip.toml` |
 
-When `--all` is used, download-based entries (GitHub, URL, shell) are updated concurrently; system packages (apt, dnf) are updated sequentially. A summary line is printed after all updates complete.
+When `--all` is used, download-based entries (GitHub, URL) are updated concurrently; system packages (apt, dnf) are updated sequentially. A summary line is printed after all updates complete.
 
 ---
 
@@ -174,7 +168,7 @@ Detects:
 - Binaries declared but not yet installed
 - Binary on disk missing from `.bin/`
 - SHA256 drift — binary on disk no longer matches `grip.lock` (possible post-install tampering)
-- Lock entries with no sha256 for sources that always record one (`github`, `url`, `shell`) — may indicate the lock was hand-edited
+- Lock entries with no sha256 for sources that always record one (`github`, `url`) — may indicate the lock was hand-edited
 - Unpinned entries — entries with no version pin that could silently auto-upgrade
 - Libraries in the lock but not found on the system
 
@@ -224,7 +218,7 @@ Exits `1` if any binary's hash does not match. Suitable for CI pipelines. For th
 
 ### `grip export`
 
-Reads `grip.toml` and `grip.lock` and prints native install commands. Versions are taken from the lock file when available. Shell entries are emitted as comments — they cannot be auto-exported.
+Reads `grip.toml` and `grip.lock` and prints native install commands. Versions are taken from the lock file when available.
 
 ```sh
 grip export                         # shell script (default)
@@ -393,35 +387,6 @@ package = "openssl-devel"
 ```
 
 Add with: `grip add libssl-dev --library`
-
----
-
-### Shell
-
-Runs an arbitrary shell command. `$GRIP_BIN_DIR` is set to the project's `.bin/` directory so the command can place the binary there.
-
-**Shell installs are blocked by default.** You must explicitly set `allow_shell = true` in `grip.toml` to permit execution. This protects against arbitrary code execution if `grip.toml` is compromised (e.g., a malicious PR that adds a shell entry).
-
-```toml
-[binaries.mytool]
-source      = "shell"
-install_cmd = "curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR"
-version     = "1.0"    # metadata only; not enforced by grip
-allow_shell = true     # must be explicitly set; false or absent blocks execution
-```
-
-Add from the CLI with `--cmd` and `--allow-shell`:
-
-```sh
-grip add mytool --source shell \
-  --cmd 'curl -fsSL https://example.com/install.sh | bash -s -- --dir $GRIP_BIN_DIR' \
-  --version 1.0 \
-  --allow-shell
-```
-
-Even with `allow_shell = true`, grip shows the `install_cmd` and prompts for confirmation before running it (when a TTY is attached). Use `grip sync --yes` to suppress the prompt in automation.
-
-After installation, grip computes the SHA-256 of the binary placed in `.bin/` (if any) and records it in `grip.lock`. This allows `grip check` to verify the binary has not been tampered with on subsequent runs.
 
 ---
 
