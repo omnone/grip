@@ -171,6 +171,23 @@ pub enum Commands {
         #[command(subcommand)]
         action: LockAction,
     },
+    /// Suggest CLI tools to add based on shell history, project scripts, and source code
+    ///
+    /// Scans ~/.bash_history, ~/.zsh_history, ~/.local/share/fish/fish_history,
+    /// Makefile, scripts/, .github/workflows/, and any source paths you pass with --path.
+    /// Cross-references findings against a curated list of known tools and your
+    /// existing grip.toml, then prints suggested `grip add` commands.
+    Suggest {
+        /// Source-code paths to scan for subprocess/exec calls (Rust, Python, JS, Go, Ruby, shell)
+        #[arg(long = "path", short = 'p', value_name = "PATH")]
+        paths: Vec<std::path::PathBuf>,
+        /// Skip scanning shell history files
+        #[arg(long)]
+        no_history: bool,
+        /// Also show candidates not present in the curated known-tools list
+        #[arg(long)]
+        all: bool,
+    },
     /// Export install commands for use in Dockerfiles or CI scripts
     Export {
         /// Output format: dockerfile | shell | makefile

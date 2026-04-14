@@ -14,6 +14,7 @@ mod lock_verify;
 mod output;
 mod platform;
 mod privilege;
+mod suggest;
 
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
@@ -238,6 +239,20 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
         Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
         Commands::Export { format } => cmd_export(&format, root, &cfg)?,
+        Commands::Suggest {
+            paths,
+            no_history,
+            all,
+        } => {
+            let opts = suggest::SuggestOptions {
+                scan_paths: paths,
+                history: !no_history,
+                show_unknown: all,
+                quiet: cfg.quiet,
+                color: color_out,
+            };
+            suggest::run_suggest(root, opts)?;
+        }
     }
 
     Ok(())
