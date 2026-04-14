@@ -239,15 +239,10 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
         Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
         Commands::Export { format } => cmd_export(&format, root, &cfg)?,
-        Commands::Suggest {
-            paths,
-            no_history,
-            all,
-        } => {
+        Commands::Suggest { paths, history } => {
             let opts = suggest::SuggestOptions {
                 scan_paths: paths,
-                history: !no_history,
-                show_unknown: all,
+                history,
                 quiet: cfg.quiet,
                 color: color_out,
             };

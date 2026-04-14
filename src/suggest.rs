@@ -16,10 +16,8 @@ use crate::output;
 pub struct SuggestOptions {
     /// Extra paths to scan for subprocess/exec calls in source code.
     pub scan_paths: Vec<PathBuf>,
-    /// Scan shell history files (bash, zsh, fish). Default: true.
+    /// Scan shell history files (bash, zsh, fish). Off by default — opt-in with --history.
     pub history: bool,
-    /// Also surface candidates not present in the curated known-tools list.
-    pub show_unknown: bool,
     pub quiet: bool,
     pub color: bool,
 }
@@ -87,9 +85,6 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<(), Gr
             continue;
         }
         let info = known.get(name.as_str()).copied();
-        if info.is_none() && !opts.show_unknown {
-            continue;
-        }
         candidates.insert(name, (info, occ));
     }
 
@@ -119,9 +114,6 @@ fn print_suggestions(
     println!("  {}", output::dim(color, "Suggested additions to grip.toml"));
     println!();
 
-    let n_known = candidates.values().filter(|(k, _)| k.is_some()).count();
-    let n_unknown = candidates.len() - n_known;
-
     for (name, (info, occ)) in candidates {
         let found: Vec<String> = occ
             .iter()
@@ -142,10 +134,7 @@ fn print_suggestions(
             }
             None => {
                 let bullet = output::yellow(color, "?");
-                println!(
-                    "  {bullet}  {name:<20}  {}",
-                    output::dim(color, "(no known GitHub source)")
-                );
+                println!("  {bullet}  {name}");
             }
         }
         println!(
@@ -156,31 +145,14 @@ fn print_suggestions(
         println!();
     }
 
+    let n = candidates.len();
     let sep = output::dim(color, &"─".repeat(60));
     println!("  {sep}");
-
-    let mut parts: Vec<String> = Vec::new();
-    if n_known > 0 {
-        parts.push(format!(
-            "{} with known sources",
-            output::green(color, &n_known.to_string())
-        ));
-    }
-    if n_unknown > 0 {
-        parts.push(format!(
-            "{} unknown",
-            output::yellow(color, &n_unknown.to_string())
-        ));
-    }
-    if !parts.is_empty() {
-        println!("  {}", parts.join(", "));
-    }
     println!(
-        "  {}",
-        output::dim(
-            color,
-            "Run `grip add <name> --source github` to add, or `grip add <name>` for system packages."
-        )
+        "  {} suggestion{}  {}",
+        output::green(color, &n.to_string()),
+        if n == 1 { "" } else { "s" },
+        output::dim(color, "· run `grip add <name>` to add any of these")
     );
     println!();
 }
@@ -409,41 +381,94 @@ fn walk_source(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
-// Language-specific subprocess / exec patterns.
-// After matching the prefix the scanner reads until the next `"` for the argument.
-const RUST_PATTERNS: &[&str] = &["Command::new(\"", "command::new(\""];
+// ── Pluggable language scanner registry ──────────────────────────────────────
+//
+// To add support for a new language, append a `LanguageScanner` entry to
+// `LANGUAGE_SCANNERS` below.  No other code needs to change.
+//
+// Each scanner describes:
+//   • which file extensions it handles
+//   • which string patterns to search for
+//
+// The engine matches each pattern, reads until the next `"`, and takes the
+// first whitespace-delimited token as the candidate tool name.  This covers
+// both list-form calls (subprocess.run(["tool", ...]) → "tool") and
+// string-form calls (os.system("tool arg") → "tool").
 
-const PYTHON_PATTERNS: &[&str] = &[
-    // List-form: subprocess.run(["tool", ...])
-    "subprocess.run([\"",
-    "subprocess.call([\"",
-    "subprocess.check_output([\"",
-    "subprocess.Popen([\"",
-    // Direct import: Popen(["tool", ...])
-    "Popen([\"",
-    // String-form: os.system("tool arg1 arg2") – we take the first token
-    "os.system(\"",
-    "os.popen(\"",
-    "shutil.which(\"",
-];
+/// Describes how to detect binary invocations in a particular language.
+struct LanguageScanner {
+    extensions: &'static [&'static str],
+    patterns: &'static [&'static str],
+}
 
-const JS_PATTERNS: &[&str] = &[
-    "exec(\"",
-    "execSync(\"",
-    "spawn(\"",
-    "spawnSync(\"",
-    "execa(\"",
-    "execFile(\"",
-    "execFileSync(\"",
-];
-
-const GO_PATTERNS: &[&str] = &["exec.Command(\"", "exec.LookPath(\""];
-
-const RUBY_PATTERNS: &[&str] = &[
-    "system(\"",
-    "IO.popen(\"",
-    "Open3.capture3(\"",
-    "Open3.popen3(\"",
+/// Registry of all supported language scanners.
+static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
+    // ── Python ────────────────────────────────────────────────────────────
+    LanguageScanner {
+        extensions: &["py"],
+        patterns: &[
+            // subprocess — list form
+            "subprocess.run([\"",
+            "subprocess.call([\"",
+            "subprocess.check_call([\"",
+            "subprocess.check_output([\"",
+            "subprocess.Popen([\"",
+            "Popen([\"",                     // direct import
+            // subprocess — string form (first token taken)
+            "subprocess.getoutput(\"",
+            "subprocess.getstatusoutput(\"",
+            // os module
+            "os.system(\"",
+            "os.popen(\"",
+            "os.execvp(\"",
+            "os.execv(\"",
+            "os.execl(\"",
+            "os.execlp(\"",
+            // shutil
+            "shutil.which(\"",
+        ],
+    },
+    // ── Rust ──────────────────────────────────────────────────────────────
+    LanguageScanner {
+        extensions: &["rs"],
+        patterns: &[
+            "Command::new(\"",
+            "command::new(\"",
+        ],
+    },
+    // ── JavaScript / TypeScript ───────────────────────────────────────────
+    LanguageScanner {
+        extensions: &["js", "ts", "mjs", "cjs", "jsx", "tsx"],
+        patterns: &[
+            "exec(\"",
+            "execSync(\"",
+            "execFile(\"",
+            "execFileSync(\"",
+            "spawn(\"",
+            "spawnSync(\"",
+            "execa(\"",
+        ],
+    },
+    // ── Go ────────────────────────────────────────────────────────────────
+    LanguageScanner {
+        extensions: &["go"],
+        patterns: &[
+            "exec.Command(\"",
+            "exec.LookPath(\"",
+        ],
+    },
+    // ── Ruby ──────────────────────────────────────────────────────────────
+    LanguageScanner {
+        extensions: &["rb"],
+        patterns: &[
+            "system(\"",
+            "IO.popen(\"",
+            "Open3.capture3(\"",
+            "Open3.capture2(\"",
+            "Open3.capture2e(\"",
+            "Open3.popen3(\"",
+        ],
+    },
 ];
 
 fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
@@ -489,16 +514,13 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
     // `Popen(["`).
     let mut seen: HashSet<String> = HashSet::new();
 
-    // ── Shell scripts: line-by-line command extraction ────────────────────────
+    // ── Shell scripts scanned via --path: binary-path references only ────────
+    // Line-by-line command extraction is intentionally skipped here — it
+    // produces too many false positives from shell keywords (if/fi/case/done),
+    // user-defined function calls, and build-system commands.  Only absolute
+    // path literals like /usr/local/bin/ffmpeg are meaningful signals when the
+    // user points us at a shell script as source code.
     if is_shell {
-        for line in content.lines() {
-            if let Some(name) = extract_command_name(line) {
-                if seen.insert(name.clone()) {
-                    out.push((name, label.clone()));
-                }
-            }
-        }
-        // Also catch full-path invocations in shell scripts.
         for name in scan_binary_paths(&content) {
             let name = name.to_string();
             if seen.insert(name.clone()) {
@@ -510,14 +532,10 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
 
     // ── Language-specific subprocess / exec patterns ──────────────────────────
     if is_lang {
-        let patterns: &[&str] = match ext {
-            "rs" => RUST_PATTERNS,
-            "py" => PYTHON_PATTERNS,
-            "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" => JS_PATTERNS,
-            "go" => GO_PATTERNS,
-            "rb" => RUBY_PATTERNS,
-            _ => &[],
-        };
+        let scanner = LANGUAGE_SCANNERS
+            .iter()
+            .find(|s| s.extensions.contains(&ext));
+        let patterns: &[&str] = scanner.map(|s| s.patterns).unwrap_or(&[]);
 
         for pattern in patterns {
             let skip = pattern.len();
@@ -738,6 +756,11 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
     ("starship",      "starship-rs/starship",          "Cross-shell prompt"),
     ("direnv",        "direnv/direnv",                 "Per-directory env vars"),
     ("mise",          "jdx/mise",                      "Dev tools version manager"),
+    // Python tooling
+    ("uv",            "astral-sh/uv",                  "Fast Python package manager"),
+    ("uvx",           "astral-sh/uv",                  "Run Python tools via uv"),
+    ("ruff",          "astral-sh/ruff",                "Fast Python linter and formatter"),
+    ("pyright",       "microsoft/pyright",              "Python static type checker"),
 ];
 
 fn known_tools() -> HashMap<&'static str, (&'static str, &'static str)> {

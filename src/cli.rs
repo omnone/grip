@@ -178,15 +178,13 @@ pub enum Commands {
     /// Cross-references findings against a curated list of known tools and your
     /// existing grip.toml, then prints suggested `grip add` commands.
     Suggest {
-        /// Source-code paths to scan for subprocess/exec calls (Rust, Python, JS, Go, Ruby, shell)
+        /// Source-code paths to scan for binary invocations (Rust, Python, JS, Go, Ruby, shell,
+        /// Dockerfile, YAML, TOML …). Detects subprocess API calls and /bin/<name> path literals.
         #[arg(long = "path", short = 'p', value_name = "PATH")]
         paths: Vec<std::path::PathBuf>,
-        /// Skip scanning shell history files
+        /// Also scan shell history files (~/.bash_history, ~/.zsh_history, fish history)
         #[arg(long)]
-        no_history: bool,
-        /// Also show candidates not present in the curated known-tools list
-        #[arg(long)]
-        all: bool,
+        history: bool,
     },
     /// Export install commands for use in Dockerfiles or CI scripts
     Export {
