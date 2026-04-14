@@ -23,7 +23,8 @@ pub struct SuggestOptions {
 }
 
 /// Main entry point for `grip suggest`.
-pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<(), GripError> {
+/// Returns the number of suggestions found (non-zero means unmanaged tools were detected).
+pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize, GripError> {
     let project_root = match root {
         Some(r) => r,
         None => {
@@ -88,11 +89,13 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<(), Gr
         candidates.insert(name, (info, occ));
     }
 
+    let n = candidates.len();
+
     if !opts.quiet {
         print_suggestions(&candidates, opts.color);
     }
 
-    Ok(())
+    Ok(n)
 }
 
 // ── Output ────────────────────────────────────────────────────────────────────
@@ -928,5 +931,137 @@ mod tests {
         assert!(b.contains("curl"));
         assert!(!b.contains("jq"));
         assert!(!b.contains("fd"));
+    }
+
+    // ── scan_binary_paths ──────────────────────────────────────────────────────
+
+    #[test]
+    fn binary_paths_detects_usr_bin() {
+        let names = scan_binary_paths("run /usr/bin/jq --arg x y");
+        assert_eq!(names, vec!["jq"]);
+    }
+
+    #[test]
+    fn binary_paths_detects_usr_local_bin() {
+        let names = scan_binary_paths("exec /usr/local/bin/kubectl get pods");
+        assert_eq!(names, vec!["kubectl"]);
+    }
+
+    #[test]
+    fn binary_paths_detects_multiple_in_same_content() {
+        let content = "PATH=/usr/bin/rg:/usr/local/bin/fd";
+        let names = scan_binary_paths(content);
+        assert!(names.contains(&"rg"), "expected rg in {names:?}");
+        assert!(names.contains(&"fd"), "expected fd in {names:?}");
+    }
+
+    #[test]
+    fn binary_paths_skips_invalid_names() {
+        // "123bad" starts with a digit — invalid
+        let names = scan_binary_paths("/usr/bin/123bad");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn binary_paths_handles_no_matches() {
+        assert!(scan_binary_paths("no binary paths here").is_empty());
+    }
+
+    // ── run_suggest return count ───────────────────────────────────────────────
+
+    #[test]
+    fn run_suggest_returns_zero_for_empty_scan() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("grip_suggest_test_empty");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let opts = SuggestOptions {
+            scan_paths: vec![],
+            history: false,
+            quiet: true,
+            color: false,
+        };
+        let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
+        assert_eq!(count, 0, "empty project with no history should yield 0 suggestions");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_suggest_detects_binary_path_in_source_file() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("grip_suggest_test_detect");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Write a Python file that references a known tool via /usr/bin/
+        let src = dir.join("script.py");
+        fs::write(&src, "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n").unwrap();
+
+        let opts = SuggestOptions {
+            scan_paths: vec![src],
+            history: false,
+            quiet: true,
+            color: false,
+        };
+        let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
+        assert!(count > 0, "jq reference should produce at least one suggestion");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_suggest_skips_already_declared_tools() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("grip_suggest_test_declared");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Declare jq in grip.toml so it should be filtered out
+        fs::write(
+            dir.join("grip.toml"),
+            "[binaries.jq]\nsource = \"github\"\nrepo = \"jqlang/jq\"\n",
+        )
+        .unwrap();
+
+        let src = dir.join("script.py");
+        fs::write(&src, "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n").unwrap();
+
+        let opts = SuggestOptions {
+            scan_paths: vec![src],
+            history: false,
+            quiet: true,
+            color: false,
+        };
+        let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
+        assert_eq!(count, 0, "jq is declared in grip.toml — should not be suggested");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_suggest_check_semantics_nonzero_means_findings() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("grip_suggest_test_check");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // subprocess.run call should match the Python language scanner.
+        // Note: the scanner matches double-quoted list forms only.
+        let src = dir.join("main.py");
+        fs::write(
+            &src,
+            "import subprocess\nsubprocess.run([\"fd\", \".\", \"--type\", \"f\"])\n",
+        )
+        .unwrap();
+
+        let opts = SuggestOptions {
+            scan_paths: vec![src],
+            history: false,
+            quiet: true,
+            color: false,
+        };
+        let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
+        // --check logic: if count > 0, caller exits 1.  We verify the count is non-zero.
+        assert!(count > 0, "fd found via subprocess.run should result in a non-zero suggestion count");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

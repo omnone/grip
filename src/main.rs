@@ -239,14 +239,28 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
         Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
         Commands::Export { format } => cmd_export(&format, root, &cfg)?,
-        Commands::Suggest { paths, history } => {
+        Commands::Suggest {
+            paths,
+            history,
+            check,
+        } => {
             let opts = suggest::SuggestOptions {
                 scan_paths: paths,
                 history,
                 quiet: cfg.quiet,
                 color: color_out,
             };
-            suggest::run_suggest(root, opts)?;
+            let n = suggest::run_suggest(root, opts)?;
+            if check && n > 0 {
+                if !cfg.quiet {
+                    eprintln!(
+                        "error: {} unmanaged tool{} found — add them to grip.toml or update the scan sources",
+                        n,
+                        if n == 1 { "" } else { "s" }
+                    );
+                }
+                std::process::exit(1);
+            }
         }
     }
 

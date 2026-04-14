@@ -87,6 +87,7 @@ $ grip check
 - **Docker-native export** — `grip export --format dockerfile` generates lock-file-accurate `RUN` instructions, so your images don't need grip installed at build time.
 - **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
 - **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
+- **Tool discovery** — `grip suggest` scans your Makefile, CI YAML, shell history, and source code (Python, Rust, JS, Go, Ruby) to find CLI tools you already use but haven't declared in `grip.toml`. Use `--check` in CI to enforce that nothing is left unmanaged.
 
 ---
 

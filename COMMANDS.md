@@ -256,6 +256,50 @@ grip run rg --version
 
 ---
 
+### `grip suggest`
+
+Scans the project and (optionally) source code for CLI tool references that are not yet declared in `grip.toml`, then prints suggested `grip add` commands.
+
+**Default scan sources** (no flags required):
+
+- `Makefile` at the project root
+- `scripts/` directory (shell scripts, Python, etc.)
+- `.github/workflows/` CI YAML files
+
+**Optional source-code scan** — pass `--path` to also detect tools referenced via subprocess/exec APIs in Rust, Python, JavaScript/TypeScript, Go, and Ruby source files, as well as `/bin/<name>` path literals in any file type.
+
+```sh
+grip suggest                              # scan Makefile, scripts/, workflows/
+grip suggest --history                    # also scan shell history
+grip suggest --path src/                  # also scan source code under src/
+grip suggest --path src/ --path scripts/  # multiple paths
+grip suggest --check                      # exit 1 if any suggestions are found (CI)
+```
+
+| Flag | Description |
+|---|---|
+| `-p, --path <PATH>` | Source-code path to scan for binary invocations (repeatable). Detects subprocess API calls and `/bin/<name>` path literals. |
+| `--history` | Also scan shell history files (`~/.bash_history`, `~/.zsh_history`, Fish history). Off by default. |
+| `--check` | Exit with status `1` if any unmanaged tools are found. Useful in CI to enforce that all tools are declared in `grip.toml`. |
+
+**Example output:**
+
+```
+  Suggested additions to grip.toml
+
+  ✦  fd                grip add sharkdp/fd --source github
+     ↳ found in: scripts/build.sh, .github/workflows/ci.yml
+
+  ?  ffmpeg
+     ↳ found in: src/encoder.py (2×)
+```
+
+Entries marked `✦` are in grip's curated tool list with a known GitHub source. Entries marked `?` were detected but have no known source — you can still add them manually.
+
+Tools already declared in `grip.toml` are excluded from the output. System builtins (`grep`, `sed`, `awk`, `curl`, etc.) are always filtered out.
+
+---
+
 ### `grip env`
 
 Prints shell code that adds `.bin/` to `PATH`. Designed to be captured by `eval`.

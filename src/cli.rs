@@ -185,6 +185,9 @@ pub enum Commands {
         /// Also scan shell history files (~/.bash_history, ~/.zsh_history, fish history)
         #[arg(long)]
         history: bool,
+        /// Exit with a non-zero status if any suggestions are found (for CI)
+        #[arg(long)]
+        check: bool,
     },
     /// Export install commands for use in Dockerfiles or CI scripts
     Export {
