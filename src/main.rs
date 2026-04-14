@@ -1,6 +1,7 @@
 //! Entry point and CLI command implementations for `grip`.
 
 mod adapters;
+mod audit;
 mod bin_dir;
 mod cache;
 mod checker;
@@ -14,6 +15,8 @@ mod lock_verify;
 mod output;
 mod platform;
 mod privilege;
+mod purl;
+mod sbom;
 mod suggest;
 
 use std::io::{IsTerminal, Write};
@@ -23,6 +26,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use clap::Parser;
 use cli::{CacheAction, Cli, Commands, LockAction};
+use sbom::SbomFormat;
 use config::lockfile::LockFile;
 use config::manifest::{
     find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry, LibDnfEntry,
@@ -239,6 +243,22 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
         Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
         Commands::Export { format } => cmd_export(&format, root, &cfg)?,
+        Commands::Sbom { format, output } => {
+            let fmt = match format.as_str() {
+                "spdx" => SbomFormat::Spdx,
+                _ => SbomFormat::CycloneDx,
+            };
+            sbom::run_sbom(root, sbom::SbomOptions { format: fmt, output })?;
+        }
+        Commands::Audit { no_fail } => {
+            audit::run_audit(audit::AuditOptions {
+                fail: !no_fail,
+                root,
+                quiet: cfg.quiet,
+                color: color_out,
+            })
+            .await?;
+        }
         Commands::Suggest {
             paths,
             history,

@@ -88,6 +88,8 @@ $ grip check
 - **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
 - **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
 - **Tool discovery** — `grip suggest` scans your Makefile, CI YAML, shell history, and source code (Python, Rust, JS, Go, Ruby) to find CLI tools you already use but haven't declared in `grip.toml`. Use `--check` in CI to enforce that nothing is left unmanaged.
+- **SBOM generation** — `grip sbom` exports a CycloneDX 1.5 or SPDX 2.3 Software Bill of Materials from `grip.lock`. Required for US federal procurement (EO 14028) and enterprise compliance. No network access needed.
+- **Vulnerability scanning** — `grip audit` cross-references every installed tool against the [OSV database](https://osv.dev/) and exits non-zero on findings, making it drop-in ready for CI pipelines.
 
 ---
 
@@ -106,6 +108,8 @@ $ grip check
 | CI mode — fail on unpinned versions | ✓ `--require-pins` | ✗ | ✗ | ✗ |
 | GPG signature verification | ✓ | ✗ | ✗ | ✗ |
 | Post-install tamper detection | ✓ `grip lock verify` | ✗ | ✗ | ✗ |
+| SBOM export (CycloneDX / SPDX) | ✓ `grip sbom` | ✗ | ✗ | ✗ |
+| CVE / advisory scanning | ✓ `grip audit` | ✗ | ✗ | ✗ |
 | Zero setup for consumers | ✓ `grip sync` | ✓ | requires brew | requires asdf |
 
 ---

@@ -256,6 +256,49 @@ grip run rg --version
 
 ---
 
+### `grip sbom`
+
+Reads `grip.lock` and emits a machine-readable Software Bill of Materials. No network access required.
+
+```sh
+grip sbom                              # CycloneDX 1.5 JSON to stdout (default)
+grip sbom --format spdx                # SPDX 2.3 JSON to stdout
+grip sbom --output sbom.json           # CycloneDX to file
+grip sbom --format spdx -o sbom.spdx.json
+```
+
+| Flag | Description |
+|---|---|
+| `--format <fmt>` | `cyclonedx` (default) or `spdx` |
+| `-o, --output <FILE>` | Write to FILE instead of stdout |
+
+**CycloneDX output** (spec version 1.5) — each lock entry becomes a `component` with:
+- `type`, `name`, `version` (leading `v` stripped per purl spec)
+- `purl` — e.g. `pkg:github/jqlang/jq@1.7.1`, `pkg:deb/debian/libssl-dev@3.0.2`
+- `hashes` — SHA-256 from the lock file (GitHub and URL sources only)
+- `externalReferences` — download URL (GitHub and URL sources only)
+
+**SPDX output** (spec version 2.3) — each entry becomes a `package` with a `purl` external reference, `checksums` when available, and `NOASSERTION` download location for system packages (apt/dnf).
+
+---
+
+### `grip audit`
+
+Queries the [OSV vulnerability database](https://osv.dev/) for known CVEs and advisories affecting your installed tools. Sends a single batch request using the purl of each `grip.lock` entry.
+
+```sh
+grip audit                 # exit 1 if any findings (default)
+grip audit --no-fail       # report findings but always exit 0
+```
+
+| Flag | Description |
+|---|---|
+| `--no-fail` | Exit 0 even when vulnerabilities are found |
+
+Exits `1` if any vulnerabilities are found (suitable for CI). Use `--no-fail` to report without blocking. Run `grip update <name>` to upgrade a vulnerable tool.
+
+---
+
 ### `grip suggest`
 
 Scans the project and (optionally) source code for CLI tool references that are not yet declared in `grip.toml`, then prints suggested `grip add` commands.

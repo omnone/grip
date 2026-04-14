@@ -18,6 +18,9 @@ Examples:
   grip check
   grip lock verify
   grip outdated
+  grip suggest --path src/
+  grip sbom --output sbom.json
+  grip audit
   grip run jq --version
   eval \"$(grip env)\"
 
@@ -194,6 +197,38 @@ pub enum Commands {
         /// Output format: dockerfile | shell | makefile
         #[arg(long, default_value = "shell")]
         format: String,
+    },
+    /// Generate a Software Bill of Materials from grip.lock
+    ///
+    /// Reads grip.lock and emits a machine-readable SBOM in CycloneDX 1.5 JSON
+    /// (default) or SPDX 2.3 JSON.  No network access required.
+    ///
+    /// Examples:
+    ///   grip sbom                              # CycloneDX to stdout
+    ///   grip sbom --format spdx                # SPDX to stdout
+    ///   grip sbom --output sbom.json           # CycloneDX to file
+    ///   grip sbom --format spdx -o sbom.spdx.json
+    Sbom {
+        /// Output format: cyclonedx (default) or spdx
+        #[arg(long, default_value = "cyclonedx", value_name = "FORMAT")]
+        format: String,
+        /// Write output to FILE instead of stdout
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Check installed tool versions against the OSV vulnerability database
+    ///
+    /// Sends a single batch query to https://api.osv.dev/v1/querybatch using
+    /// the purl of each entry in grip.lock.  Prints a table of findings and
+    /// exits non-zero if any are found (suitable for CI).
+    ///
+    /// Examples:
+    ///   grip audit
+    ///   grip audit --no-fail    # report findings but always exit 0
+    Audit {
+        /// Exit 0 even when vulnerabilities are found (default: exit 1 on findings)
+        #[arg(long)]
+        no_fail: bool,
     },
     /// Print shell code to add .bin/ to PATH (for use with eval)
     ///
