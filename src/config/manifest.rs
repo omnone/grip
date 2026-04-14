@@ -274,7 +274,13 @@ impl LibraryEntry {
 impl Manifest {
     /// Load and parse a `grip.toml` from `path`.
     pub fn load(path: &Path) -> Result<Self, GripError> {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GripError::ManifestNotFound
+            } else {
+                GripError::Io(e)
+            }
+        })?;
         let manifest: Manifest = toml::from_str(&content)?;
         Ok(manifest)
     }

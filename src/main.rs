@@ -729,7 +729,17 @@ fn cmd_run(args: Vec<String>, root: Option<std::path::PathBuf>) -> Result<(), Gr
     let status = std::process::Command::new(&args[0])
         .args(&args[1..])
         .env("PATH", new_path)
-        .status()?;
+        .status()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GripError::Other(format!(
+                    "'{}' not found — run `grip add {}` then `grip sync` to install it",
+                    args[0], args[0]
+                ))
+            } else {
+                GripError::Io(e)
+            }
+        })?;
 
     std::process::exit(status.code().unwrap_or(1));
 }
