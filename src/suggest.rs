@@ -360,11 +360,21 @@ fn scan_ci_yaml(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
 
 // ── Source-code scanning ──────────────────────────────────────────────────────
 
-/// Scan source files under the given paths for subprocess / exec calls.
+/// Scan source files under the given paths for subprocess / exec calls and
+/// binary path literals.
 fn scan_source_code(paths: &[PathBuf]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for p in paths {
-        walk_source(p, p, &mut out);
+        // When a single file is passed, use its parent as the base so the
+        // label shows the filename rather than an empty string.
+        let base = if p.is_file() {
+            p.parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(|| p.clone())
+        } else {
+            p.clone()
+        };
+        walk_source(p, &base, &mut out);
     }
     out
 }
@@ -379,7 +389,7 @@ fn walk_source(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         for entry in entries.flatten() {
             let child = entry.path();
             let fname = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Skip hidden dirs and known build artifact directories.
+            // Skip hidden dirs and known build artifact / dependency directories.
             if fname.starts_with('.')
                 || matches!(
                     fname,
@@ -399,16 +409,19 @@ fn walk_source(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
-/// Patterns: (prefix_to_match, chars_to_skip_after_match).
-/// After skipping, we read until the next `"` to get the tool name.
+// Language-specific subprocess / exec patterns.
+// After matching the prefix the scanner reads until the next `"` for the argument.
 const RUST_PATTERNS: &[&str] = &["Command::new(\"", "command::new(\""];
 
 const PYTHON_PATTERNS: &[&str] = &[
+    // List-form: subprocess.run(["tool", ...])
     "subprocess.run([\"",
     "subprocess.call([\"",
     "subprocess.check_output([\"",
     "subprocess.Popen([\"",
+    // Direct import: Popen(["tool", ...])
     "Popen([\"",
+    // String-form: os.system("tool arg1 arg2") – we take the first token
     "os.system(\"",
     "os.popen(\"",
     "shutil.which(\"",
@@ -421,6 +434,7 @@ const JS_PATTERNS: &[&str] = &[
     "spawnSync(\"",
     "execa(\"",
     "execFile(\"",
+    "execFileSync(\"",
 ];
 
 const GO_PATTERNS: &[&str] = &["exec.Command(\"", "exec.LookPath(\""];
@@ -433,58 +447,136 @@ const RUBY_PATTERNS: &[&str] = &[
 ];
 
 fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
-    let label = path
-        .strip_prefix(base)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .to_string();
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    // Compute a stable, non-empty label relative to `base`.
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    let label: String = if rel.as_os_str().is_empty() {
+        // path == base (single file passed directly)
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string())
+    } else {
+        rel.to_string_lossy().to_string()
+    };
 
-    // Shell scripts: reuse the line-by-line extractor.
-    if matches!(ext, "sh" | "bash" | "zsh") {
-        let Ok(content) = fs::read_to_string(path) else {
-            return;
-        };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    let is_shell = matches!(ext, "sh" | "bash" | "zsh");
+    let is_lang = matches!(
+        ext,
+        "rs" | "py" | "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" | "go" | "rb"
+    );
+    // Files where we only run the binary-path scanner (no language API patterns).
+    let is_paths_only = matches!(
+        ext,
+        "yml" | "yaml" | "toml" | "json" | "mk" | "dockerfile" | "conf" | "cfg" | "ini"
+    ) || (ext.is_empty()
+        && matches!(
+            fname,
+            "Dockerfile" | "Makefile" | "makefile" | "GNUmakefile" | "Justfile"
+        ));
+
+    if !is_shell && !is_lang && !is_paths_only {
+        return;
+    }
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+
+    // Per-file dedup: avoid double-counting the same tool from overlapping
+    // patterns (e.g. `subprocess.Popen` matching both `subprocess.Popen(["` and
+    // `Popen(["`).
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // ── Shell scripts: line-by-line command extraction ────────────────────────
+    if is_shell {
         for line in content.lines() {
             if let Some(name) = extract_command_name(line) {
+                if seen.insert(name.clone()) {
+                    out.push((name, label.clone()));
+                }
+            }
+        }
+        // Also catch full-path invocations in shell scripts.
+        for name in scan_binary_paths(&content) {
+            let name = name.to_string();
+            if seen.insert(name.clone()) {
                 out.push((name, label.clone()));
             }
         }
         return;
     }
 
-    let patterns: &[&str] = match ext {
-        "rs" => RUST_PATTERNS,
-        "py" => PYTHON_PATTERNS,
-        "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" => JS_PATTERNS,
-        "go" => GO_PATTERNS,
-        "rb" => RUBY_PATTERNS,
-        _ => return,
-    };
+    // ── Language-specific subprocess / exec patterns ──────────────────────────
+    if is_lang {
+        let patterns: &[&str] = match ext {
+            "rs" => RUST_PATTERNS,
+            "py" => PYTHON_PATTERNS,
+            "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" => JS_PATTERNS,
+            "go" => GO_PATTERNS,
+            "rb" => RUBY_PATTERNS,
+            _ => &[],
+        };
 
-    let Ok(content) = fs::read_to_string(path) else {
-        return;
-    };
-
-    for pattern in patterns {
-        let skip = pattern.len();
-        let mut pos = 0;
-        while pos < content.len() {
-            let Some(found) = content[pos..].find(pattern) else {
-                break;
-            };
-            let start = pos + found + skip;
-            if start < content.len() {
-                if let Some(end) = content[start..].find('"') {
-                    let candidate = &content[start..start + end];
-                    if is_valid_tool_name(candidate) {
-                        out.push((candidate.to_string(), label.clone()));
+        for pattern in patterns {
+            let skip = pattern.len();
+            let mut pos = 0;
+            while pos < content.len() {
+                let Some(found) = content[pos..].find(pattern) else {
+                    break;
+                };
+                let start = pos + found + skip;
+                if start < content.len() {
+                    if let Some(end) = content[start..].find('"') {
+                        let raw = &content[start..start + end];
+                        // Take only the first whitespace-delimited token so that
+                        // os.system("kubectl get pods") → "kubectl" (not the full string).
+                        let first = raw.split_whitespace().next().unwrap_or(raw);
+                        // Strip any path prefix: /usr/bin/kubectl → kubectl.
+                        let name = first.rsplit('/').next().unwrap_or(first);
+                        if is_valid_tool_name(name) && seen.insert(name.to_string()) {
+                            out.push((name.to_string(), label.clone()));
+                        }
                     }
                 }
+                pos += found + pattern.len();
             }
-            pos += found + pattern.len();
         }
     }
+
+    // ── Universal binary-path scan ────────────────────────────────────────────
+    // Runs for all supported file types (language files, shell scripts already
+    // returned above, and paths-only files like Dockerfile / YAML).
+    // Catches literals like /usr/local/bin/kubectl → "kubectl".
+    for name in scan_binary_paths(&content) {
+        let name = name.to_string();
+        if seen.insert(name.clone()) {
+            out.push((name, label.clone()));
+        }
+    }
+}
+
+/// Find absolute binary-path references (`/usr/bin/jq`, `/usr/local/bin/kubectl`, …).
+/// Returns a slice of tool-name `&str`s borrowed from `content`.
+fn scan_binary_paths(content: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut pos = 0;
+    while let Some(found) = content[pos..].find("/bin/") {
+        let name_start = pos + found + 5; // skip "/bin/"
+        if name_start < content.len() {
+            let rest = &content[name_start..];
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            if is_valid_tool_name(name) {
+                names.push(name);
+            }
+        }
+        pos += found + 5;
+    }
+    names
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
