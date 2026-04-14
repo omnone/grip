@@ -4,224 +4,225 @@
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs/)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/omnone/grip/actions)
 
-**A per-project tool dependency manager** — like `cargo.toml`, but for the binaries your project actually depends on.
+**A per-project tool dependency manager** — like `Cargo.toml` or `package.json`, but for the CLI binaries your project depends on.
 
-Declare your tools in `grip.toml`. Run `grip sync`.  
-That's it.
-
-Every developer, CI job, and Docker build gets **byte-for-byte identical binaries**:
-
-- no version drift  
-- no manual setup docs  
-- no global installs  
-- no surprises  
+Declare your tools in `grip.toml`. Run `grip sync`. Every developer, CI job, and Docker build gets the exact same binaries — same version, same SHA-256, no setup docs, no surprises.
 
 ---
 
-## Why grip exists
+## The problem
 
-If your project depends on CLI tools, you already have a dependency problem — just without a proper solution.
+Every project depends on CLI tools — `jq`, `kubectl`, `terraform`, `protoc`, custom release binaries. But there is no standard way to manage them:
 
-It usually looks like this:
+- README says "install `jq >= 1.6`" — everyone installs something slightly different
+- CI pulls the *latest* release — until a breaking change breaks the build
+- Dockerfiles have versions copy-pasted from a wiki that nobody updates
+- A new teammate spends an afternoon installing things manually before they can run the project
 
-- A Makefile full of `curl | sh` scripts that *kind of* install things  
-- A README that says "install `jq >= 1.6`" (so everyone runs something different)  
-- CI pipelines pulling the *latest* version — until a breaking release ruins your day or triggers a security incident  
-- Dockerfiles with pinned versions that slowly rot out of sync  
-
-This is dependency management — just inconsistent, fragile, and invisible.
+This is a dependency problem, and it deserves a real solution.
 
 ---
 
 ## The solution
 
-**grip brings real dependency management to your tooling stack.**
+grip gives CLI tools the same treatment that npm, Cargo, and pip give code libraries:
 
-Like npm, Cargo, and pip did for code, grip gives you:
+- A **manifest** (`grip.toml`) — declare which tools the project needs and where to get them
+- A **lockfile** (`grip.lock`) — records the exact version, download URL, and SHA-256 of every tool
+- One command (`grip sync`) — installs everything reproducibly from the lockfile
 
-- A **manifest** (`grip.toml`) to declare tools  
-- A **lockfile** to pin exact versions  
-- A single command (`grip sync`) to install everything reproducibly  
-
-No guesswork. No drift. No "works on my machine."
+Commit both files. Every developer runs `grip sync` after pulling. That is the entire workflow.
 
 ---
 
-```
+## Quickstart
+
+```sh
+# 1. Set up grip in your project (run once, from the project root)
 $ grip init
-  ✓  created grip.toml
-  ✓  added .bin/ to .gitignore
+Created grip.toml
+Created .gitignore with .bin/
 
-$ grip add BurntSushi/ripgrep
-  [1/1] ✓  rg  14.1.1
+# 2. Add a tool — grip downloads and installs it immediately
+$ grip add jq@1.7.1 --repo jqlang/jq --source github
+Added 'jq' to grip.toml
 
-$ grip add jq --source github --repo jqlang/jq
-  [1/1] ✓  jq  1.7.1
+  1 installed  (1.2s)
 
+# 3. See what is installed
 $ grip list
 
   Installed binaries (from grip.lock)
 
-  NAME               VERSION        SOURCE     INSTALLED AT
-  ──────────────────────────────────────────────────────────────────
-  rg                 14.1.1         github     2024-03-21 16:18
-  jq                 1.7.1          github     2024-03-21 16:19
+  NAME    VERSION   SOURCE   INSTALLED AT
+  ──────────────────────────────────────────────
+  jq      1.7.1     github   2025-03-14 09:41
 
-# On a teammate's machine after git pull:
+# 4. Commit the manifest and lockfile so everyone gets the same thing
+$ git add grip.toml grip.lock
+$ git commit -m "add dev tools"
+```
+
+**On a teammate's machine** — after `git pull`, a single command installs everything:
+
+```sh
 $ grip sync --locked
-  ✓  all 2 binaries up to date
+  All up to date  (1 skipped, 0.0s)
+```
 
+`--locked` means the build fails if `grip.lock` would change — no silent version drift in CI.
+
+---
+
+## Day-to-day workflow
+
+### Run a tool without changing your shell PATH
+
+```sh
+$ grip run jq --version
+jq-1.7.1
+```
+
+### Add your project's `.bin/` to PATH for the current shell session
+
+```sh
+$ eval "$(grip env)"
+$ jq --version
+jq-1.7.1
+```
+
+### Check that what is installed matches the lockfile
+
+```sh
 $ grip check
-  ✓  rg   14.1.1   github  sha256 verified
-  ✓  jq   1.7.1    github  sha256 verified
+
+  Checking installed binaries…
+
+  ✓  jq
+
+  All 1 checks passed
+```
+
+### See if newer versions are available
+
+```sh
+$ grip outdated
+
+  BINARY   INSTALLED   LATEST    STATUS
+  ──────────────────────────────────────
+  jq       1.7.1       1.7.1     up to date
+```
+
+### Remove a tool
+
+```sh
+$ grip remove jq
+  ✓  removed .bin/jq
+  ✓  removed 'jq' from [binaries] in grip.toml
+```
+
+---
+
+## Example `grip.toml`
+
+```toml
+# Pin an exact version from GitHub Releases
+[binaries.jq]
+source  = "github"
+repo    = "jqlang/jq"
+version = "1.7.1"
+
+# Use a semver range — grip resolves to the highest matching release
+# and pins the resolved version in grip.lock
+[binaries.kubectl]
+source  = "github"
+repo    = "kubernetes/kubectl"
+version = "^1.30"
+
+# Install from the system package manager (apt or dnf)
+[binaries.ripgrep]
+source  = "apt"
+package = "ripgrep"
+binary  = "rg"        # the on-PATH command differs from the package name
+
+# Declare a system library (no binary symlink, just ensures the package is present)
+[libraries.libssl-dev]
+source  = "apt"
+package = "libssl-dev"
+```
+
+You never edit `grip.lock` by hand — grip maintains it automatically.
+
+---
+
+## Docker and CI
+
+### Export lock-accurate install instructions — no grip required in the image
+
+```sh
+$ grip export --format dockerfile
+```
+
+```dockerfile
+# Generated by grip export --format dockerfile
+RUN curl -fsSL -o /usr/local/bin/jq \
+    "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64" \
+    && chmod +x /usr/local/bin/jq
+```
+
+Paste this into your `Dockerfile`. The URL and version come straight from `grip.lock`, so they stay in sync automatically.
+
+### Recommended CI setup
+
+```sh
+grip sync --locked --require-pins   # fails if lock would change, or any version floats
+grip lock verify                    # re-hashes every .bin/ binary; catches tampering
 ```
 
 ---
 
 ## Features
 
-- **Byte-for-byte reproducibility** — `grip.lock` records the exact version, download URL, and SHA-256 of every installed binary. `grip sync --locked` fails CI if the lock would change.
+- **Byte-for-byte reproducibility** — `grip.lock` records the exact version, download URL, and SHA-256 of every installed binary.
 - **No global pollution** — tools land in `.bin/` at the project root; nothing touches `/usr/local/bin` or any system directory.
-- **Fast, cached installs** — a local download cache avoids re-fetching archives on every run. Concurrent installs for download-based sources.
-- **Mixed sources in one file** — GitHub Releases, direct URLs, APT, and DNF all declared in a single `grip.toml`.
-- **Docker-native export** — `grip export --format dockerfile` generates lock-file-accurate `RUN` instructions, so your images don't need grip installed at build time.
-- **Library support** — declare `apt`/`dnf` packages that produce no binary (headers, shared libs) alongside your tools in the same manifest.
-- **Supply chain attack protection** — GPG signature verification for GitHub and URL sources, `grip lock verify` for post-install tamper detection, and `--require-pins` to block silent auto-upgrades in CI. See [SECURITY.md](SECURITY.md).
-- **Tool discovery** — `grip suggest` scans your Makefile, CI YAML, shell history, and source code (Python, Rust, JS, Go, Ruby) to find CLI tools you already use but haven't declared in `grip.toml`. Use `--check` in CI to enforce that nothing is left unmanaged.
-- **SBOM generation** — `grip sbom` exports a CycloneDX 1.5 or SPDX 2.3 Software Bill of Materials from `grip.lock`. Required for US federal procurement (EO 14028) and enterprise compliance. No network access needed.
-- **Vulnerability scanning** — `grip audit` cross-references every installed tool against the [OSV database](https://osv.dev/) and exits non-zero on findings, making it drop-in ready for CI pipelines.
-
----
-
-## How it compares
-
-| Feature | grip | Makefile + curl | brew | asdf / mise |
-|---------|:----:|:---------------:|:----:|:-----------:|
-| Per-project isolation | ✓ | ✓ | ✗ global | ✓ |
-| Lockfile with SHA-256 | ✓ | ✗ | partial | ✗ |
-| GitHub, URL, APT, DNF | ✓ | manual | ✗ | via plugins |
-| Docker export (no grip in image) | ✓ | ✗ | ✗ | ✗ |
-| System library packages | ✓ | ✗ | ✗ | ✗ |
-| Semver ranges | ✓ | ✗ | ✓ | ✗ |
-| Works on Linux + macOS | ✓ | ✓ | macOS-first | ✓ |
-| CI mode — fail on lock drift | ✓ `--locked` | ✗ | ✗ | ✗ |
-| CI mode — fail on unpinned versions | ✓ `--require-pins` | ✗ | ✗ | ✗ |
-| GPG signature verification | ✓ | ✗ | ✗ | ✗ |
-| Post-install tamper detection | ✓ `grip lock verify` | ✗ | ✗ | ✗ |
-| SBOM export (CycloneDX / SPDX) | ✓ `grip sbom` | ✗ | ✗ | ✗ |
-| CVE / advisory scanning | ✓ `grip audit` | ✗ | ✗ | ✗ |
-| Zero setup for consumers | ✓ `grip sync` | ✓ | requires brew | requires asdf |
-
----
-
-## Quick start
-
-```sh
-grip init                          # create grip.toml, add .bin/ to .gitignore
-grip add BurntSushi/ripgrep        # add from GitHub Releases (installs immediately)
-grip add jq --source apt           # or from the system package manager
-eval "$(grip env)"                 # add .bin/ to PATH for this shell session
-grip run rg --version              # or run a tool without touching PATH
-```
-
-`grip add` installs the binary immediately and writes both `grip.toml` (the manifest) and `grip.lock` (the lockfile with the exact version, download URL, and SHA-256). You never edit `grip.lock` by hand — grip maintains it automatically. `grip sync` also updates the lockfile for any entries not yet recorded there.
-
-Commit both files so teammates and CI get identical binaries:
-
-```sh
-git add grip.toml grip.lock
-git commit -m "add dev tools"
-```
-
-On any other machine, after cloning:
-
-```sh
-grip sync --locked     # installs exactly what's in grip.lock; fails if it would change
-```
-
-### Example `grip.toml`
-
-```toml
-[binaries.jq]
-source = "github"
-repo   = "jqlang/jq"
-version = "^1.7"          # semver range; resolved version is pinned in grip.lock
-
-[binaries.ripgrep]
-source  = "apt"           # or "dnf" on RPM-based systems
-package = "ripgrep"
-binary  = "rg"            # on-PATH command differs from the package name
-
-[binaries.ffmpeg]
-source          = "apt"
-package         = "ffmpeg"
-extra_binaries  = ["ffprobe", "ffplay"]  # additional binaries installed by the same package
-
-[libraries.libssl-dev]
-source  = "apt"
-package = "libssl-dev"
-version = "3.0.2"         # system library — no .bin/ symlink created
-```
-
-### Docker / CI
-
-Use `grip export` to generate native install instructions from the lock file — no grip required in the image:
-
-```sh
-grip export --format dockerfile
-```
-
-```dockerfile
-# Generated by grip export --format dockerfile
-RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    ripgrep=14.1.0 \
-    libssl-dev=3.0.2 \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL -o /usr/local/bin/jq \
-    "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64" \
-    && chmod +x /usr/local/bin/jq
-```
-
-In CI without Docker, enforce the lock file directly:
-
-```sh
-grip sync --locked    # fails the build if grip.lock would change
-```
+- **Mixed sources** — GitHub Releases, direct URLs, APT, and DNF all declared in a single `grip.toml`.
+- **Fast installs** — a local download cache avoids re-fetching on every run; multiple tools install concurrently.
+- **Semver ranges** — `version = "^1.30"` resolves to the highest matching release and locks the result.
+- **Docker-native export** — `grip export --format dockerfile | shell | makefile` generates lock-accurate install instructions; grip does not need to be present in the image.
+- **Library support** — declare `apt`/`dnf` system library packages alongside your binaries in the same manifest.
+- **Supply chain protection** — optional GPG signature verification, `grip lock verify` for tamper detection, `--require-pins` to block floating versions. See [SECURITY.md](SECURITY.md).
+- **Tool discovery** — `grip suggest` scans your Makefile, CI YAML, shell history, and source code to find tools you already use but haven't declared yet. Add `--check` in CI to enforce that nothing is left unmanaged.
+- **SBOM generation** — `grip sbom` exports a CycloneDX 1.5 or SPDX 2.3 Software Bill of Materials from `grip.lock`. No network access needed.
+- **Vulnerability scanning** — `grip audit` cross-references every installed tool against the [OSV database](https://osv.dev/) and exits non-zero on findings.
 
 ---
 
 ## Installation
 
-Pre-built binaries for Linux and macOS are planned for a future release. For now, build from source using the Rust stable toolchain.
+Pre-built binaries are planned. For now, build from source with the Rust stable toolchain.
 
-**Prerequisites:** install [rustup](https://rustup.rs/) if you don't have Rust yet:
+Install Rust if you don't have it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Clone the repository:
+Clone and install:
 
 ```sh
 git clone https://github.com/omnone/grip.git
 cd grip
+cargo install --path .    # installs grip into ~/.cargo/bin (already on your PATH)
 ```
 
-**Option A — install system-wide** (copies `grip` into `~/.cargo/bin`, which is already on your `PATH`):
-
-```sh
-cargo install --path .
-```
-
-**Option B — build a release binary** and place it wherever you like:
+Or build a release binary and place it wherever you like:
 
 ```sh
 cargo build --release
-# binary is at target/release/grip
-sudo cp target/release/grip /usr/local/bin/grip   # or any directory on your PATH
+sudo cp target/release/grip /usr/local/bin/grip
 ```
 
-Verify the install:
+Verify:
 
 ```sh
 grip --version
@@ -231,27 +232,20 @@ grip --version
 
 ## Security
 
-grip includes layered supply chain attack protections:
+grip supports layered supply chain protections:
 
-- **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry; grip verifies the release asset signature before installing (direct `.sig`/`.asc` or signed `SHA256SUMS` file).
-- **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading.
+- **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry to verify the release asset signature before installing.
+- **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading anything.
 - **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".
-- **`grip doctor`** detects SHA256 drift, missing hashes in the lock, and unpinned entries.
+- **Health checks** — `grip doctor` detects SHA-256 drift, missing hashes, and unpinned entries.
 
-Recommended CI setup:
-
-```sh
-grip sync --locked --require-pins
-grip lock verify
-```
-
-See [SECURITY.md](SECURITY.md) for the full security guide including GPG setup, threat model, and CI configuration examples.
+See [SECURITY.md](SECURITY.md) for the full guide.
 
 ---
 
 ## CLI reference
 
-For the full command reference — all flags, `grip.toml` source types, shell integration, and CI guidance — see [COMMANDS.md](COMMANDS.md).
+For the full command reference — all flags, source types, shell integration, and CI guidance — see [COMMANDS.md](COMMANDS.md).
 
 ---
 
