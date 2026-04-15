@@ -4,15 +4,20 @@
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs/)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/omnone/grip/actions)
 
-**A per-project tool dependency manager** — like `Cargo.toml` or `package.json`, but for the CLI binaries your project depends on.
+**Your code has a lockfile. Your tools don't.**
 
-Declare your tools in `grip.toml`. Run `grip sync`. Every developer, CI job, and Docker build gets the exact same binaries — same version, same SHA-256, no setup docs, no surprises.
+grip gives CLI tools the same treatment that npm gives packages and Cargo
+gives crates — declare them, lock them, sync them.
+
+Declare your tools in `grip.toml`. Run `grip sync`. Every developer, CI job,
+and Docker build gets the exact same binaries — same version, same SHA-256,
+no setup docs, no surprises.
 
 ---
 
 ## The problem
 
-Every project depends on CLI tools — `jq`, `kubectl`, `terraform`, `protoc`, custom release binaries. But there is no standard way to manage them:
+Every project depends on CLI tools but there is no standard way to manage them:
 
 - README says "install `jq >= 1.6`" — everyone installs something slightly different
 - CI pulls the *latest* release — until a breaking change breaks the build
@@ -25,7 +30,7 @@ This is a dependency problem, and it deserves a real solution.
 
 ## The solution
 
-grip gives CLI tools the same treatment that npm, Cargo, and pip give code libraries:
+Three pieces, one workflow:
 
 - A **manifest** (`grip.toml`) — declare which tools the project needs and where to get them
 - A **lockfile** (`grip.lock`) — records the exact version, download URL, and SHA-256 of every tool
@@ -108,10 +113,14 @@ $ grip check
 ```sh
 $ grip outdated
 
-  BINARY   INSTALLED   LATEST    STATUS
-  ──────────────────────────────────────
-  jq       1.7.1       1.7.1     up to date
+  BINARY    INSTALLED   LATEST    STATUS
+  ───────────────────────────────────────
+  jq        1.7.1       1.7.1     up to date
+  kubectl   1.30.2      1.31.0    outdated
+  terraform 1.6.6       1.8.1     outdated
 ```
+
+Run `grip add kubectl@1.31.0` to update, then `git commit grip.toml grip.lock`.
 
 ### Remove a tool
 
@@ -144,6 +153,12 @@ version = "^1.30"
 source  = "apt"
 package = "ripgrep"
 binary  = "rg"        # the on-PATH command differs from the package name
+
+# Install from a direct URL (SHA-256 is recorded in grip.lock)
+[binaries.protoc]
+source  = "url"
+url     = "https://github.com/protocolbuffers/protobuf/releases/download/v26.1/protoc-26.1-linux-x86_64.zip"
+binary  = "bin/protoc"
 
 # Declare a system library (no binary symlink, just ensures the package is present)
 [libraries.libssl-dev]
@@ -179,29 +194,69 @@ grip sync --locked --require-pins   # fails if lock would change, or any version
 grip lock verify                    # re-hashes every .bin/ binary; catches tampering
 ```
 
+`grip sync --locked` is for the beginning of a job — it ensures the lockfile is respected exactly. `grip lock verify` is a post-install integrity check: it re-hashes every binary in `.bin/` against the recorded SHA-256 without re-downloading anything, catching corruption or tampering introduced between sync and execution.
+
 ---
 
 ## Features
 
 - **Byte-for-byte reproducibility** — `grip.lock` records the exact version, download URL, and SHA-256 of every installed binary.
-- **No global pollution** — tools land in `.bin/` at the project root; nothing touches `/usr/local/bin` or any system directory.
-- **Mixed sources** — GitHub Releases, direct URLs, APT, and DNF all declared in a single `grip.toml`.
-- **Fast installs** — a local download cache avoids re-fetching on every run; multiple tools install concurrently.
+- **No global pollution** — tools land in `.bin/` at the project root; nothing touches system directories.
+- **Mixed sources** — four source types are currently supported: `github`, `url`, `apt`, and `dnf`, all declared in a single `grip.toml`.
+- **Fast installs** — a local download cache avoids re-fetching; multiple tools install concurrently.
 - **Semver ranges** — `version = "^1.30"` resolves to the highest matching release and locks the result.
-- **Docker-native export** — `grip export --format dockerfile | shell | makefile` generates lock-accurate install instructions; grip does not need to be present in the image.
-- **Library support** — declare `apt`/`dnf` system library packages alongside your binaries in the same manifest.
-- **Supply chain protection** — optional GPG signature verification, `grip lock verify` for tamper detection, `--require-pins` to block floating versions. See [SECURITY.md](SECURITY.md).
-- **Tool discovery** — `grip suggest` scans your Makefile, CI YAML, shell history, and source code to find tools you already use but haven't declared yet. Add `--check` in CI to enforce that nothing is left unmanaged.
-- **SBOM generation** — `grip sbom` exports a CycloneDX 1.5 or SPDX 2.3 Software Bill of Materials from `grip.lock`. No network access needed.
-- **Vulnerability scanning** — `grip audit` cross-references every installed tool against the [OSV database](https://osv.dev/) and exits non-zero on findings.
+- **Supply chain protection** — optional GPG verification, tamper detection, and floating-version enforcement. See [SECURITY.md](SECURITY.md).
+
+### Discover undeclared tools
+
+`grip suggest` scans your Makefile, CI YAML, shell history, and source code for tools you already use but haven't declared:
+
+```sh
+$ grip suggest
+
+  jq          referenced in .github/workflows/release.yml  →  grip add jq
+  yq          referenced in scripts/deploy.sh              →  grip add yq
+  shellcheck  referenced in Makefile                       →  grip add shellcheck
+```
+
+Add `grip suggest --check` to CI to fail if any tool is left unmanaged.
+
+### SBOM generation
+
+`grip sbom` exports a Software Bill of Materials directly from `grip.lock` — no network access needed:
+
+```sh
+$ grip sbom --format cyclonedx > sbom.json
+$ grip sbom --format spdx > sbom.spdx
+```
+
+CycloneDX 1.5 and SPDX 2.3 are both supported.
+
+### Vulnerability scanning
+
+`grip audit` cross-references every installed tool against the [OSV database](https://osv.dev/) and exits non-zero on findings:
+
+```sh
+$ grip audit
+
+  Checking 3 binaries against OSV…
+
+  jq        1.7.1   ✓  no known vulnerabilities
+  kubectl   1.30.2  ✓  no known vulnerabilities
+  terraform 1.6.6   ✗  1 vulnerability  (run grip audit --json for details)
+
+  1 vulnerability found — exit code 1
+```
+
+Add `grip audit` to CI to block deploys when new CVEs are published against your declared tools.
 
 ---
 
 ## Installation
 
-Pre-built binaries are planned. For now, build from source with the Rust stable toolchain.
+grip runs on Linux and macOS. Windows is not currently supported.
 
-Install Rust if you don't have it:
+Build from source with the Rust stable toolchain. Install Rust if you don't have it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
