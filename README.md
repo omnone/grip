@@ -98,6 +98,8 @@ jq-1.7.1
 
 ### Check that what is installed matches the lockfile
 
+`grip check` verifies installed binaries against the lockfile and also reports consistency issues — orphaned lock entries, unpinned versions, and missing SHA-256 hashes.
+
 ```sh
 $ grip check
 
@@ -107,6 +109,31 @@ $ grip check
 
   All 1 checks passed
 ```
+
+If any consistency issues are found, they appear in a separate section and `grip check` exits non-zero:
+
+```sh
+$ grip check
+
+  Checking installed binaries…
+
+  ✓  jq
+
+  Consistency issues
+
+  ⚠  binary 'kubectl' (github) has no version pin — run `grip pin` to fix
+
+  1 check passed, 1 consistency issue
+```
+
+### Pin unpinned tools to their installed versions
+
+```sh
+$ grip pin              # write exact versions from grip.lock into grip.toml
+$ grip pin --dry-run    # preview what would be pinned without modifying grip.toml
+```
+
+Entries that are not yet installed (not in `grip.lock`) are skipped with a warning — run `grip sync` first, then re-run `grip pin`.
 
 ### See if newer versions are available
 
@@ -292,7 +319,7 @@ grip supports layered supply chain protections:
 - **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry to verify the release asset signature before installing.
 - **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading anything.
 - **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".
-- **Health checks** — `grip doctor` detects SHA-256 drift, missing hashes, and unpinned entries.
+- **Health checks** — `grip check` detects orphaned lock entries, missing SHA-256 hashes, and unpinned entries in addition to verifying installed binaries.
 
 See [SECURITY.md](SECURITY.md) for the full guide.
 

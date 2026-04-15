@@ -160,8 +160,20 @@ pub enum Commands {
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Check consistency of grip.toml, grip.lock, and .bin/
-    Doctor,
+    /// Pin all unpinned entries in grip.toml to their currently installed versions (from grip.lock)
+    ///
+    /// Reads each binary and library that has no `version` field and writes the exact version
+    /// recorded in grip.lock back into grip.toml. Entries that are not yet installed are skipped
+    /// with a warning — run `grip sync` first, then re-run `grip pin`.
+    ///
+    /// Examples:
+    ///   grip pin              # pin everything unpinned
+    ///   grip pin --dry-run    # preview changes without writing grip.toml
+    Pin {
+        /// Preview what would be pinned without modifying grip.toml
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage the local download cache (~/.cache/grip/downloads/)
     Cache {
         #[command(subcommand)]

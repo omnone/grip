@@ -76,7 +76,7 @@ grip sync --verify                  # re-verify SHA256 of already-installed bina
 
 ### `grip check`
 
-Verifies `.bin/` against `grip.lock` without installing or modifying anything. Checks binary existence, version pins, and SHA256 checksums.
+Verifies `.bin/` against `grip.lock` without installing or modifying anything. Checks binary existence, version pins, and SHA256 checksums. Also performs global consistency checks — orphaned lock entries (present in `grip.lock` but not in `grip.toml`), unpinned entries, and lock entries missing a SHA-256 for sources that always record one (`github`, `url`).
 
 ```sh
 grip check
@@ -85,9 +85,9 @@ grip check --tag ci
 
 | Flag | Description |
 |---|---|
-| `--tag <tag>` | Only check entries that carry this tag |
+| `--tag <tag>` | Only check entries that carry this tag (applies to per-binary checks; consistency checks always run) |
 
-Exits `0` if all required entries pass; `1` if any required entry fails.
+Exits `0` if all checks pass and no consistency issues are found; `1` if any check fails or any consistency issue is detected.
 
 ---
 
@@ -159,18 +159,18 @@ grip list --all    # all declared entries; uninstalled ones are highlighted
 
 ---
 
-### `grip doctor`
+### `grip pin`
 
-Checks consistency between `grip.toml`, `grip.lock`, and `.bin/`. No flags.
+Reads every binary and library in `grip.toml` that has no `version` field and writes the exact version recorded in `grip.lock` back into `grip.toml`. Entries that are not yet installed are skipped with a warning — run `grip sync` first, then re-run `grip pin`.
 
-Detects:
-- Orphaned lock entries (in lock but not in manifest)
-- Binaries declared but not yet installed
-- Binary on disk missing from `.bin/`
-- SHA256 drift — binary on disk no longer matches `grip.lock` (possible post-install tampering)
-- Lock entries with no sha256 for sources that always record one (`github`, `url`) — may indicate the lock was hand-edited
-- Unpinned entries — entries with no version pin that could silently auto-upgrade
-- Libraries in the lock but not found on the system
+```sh
+grip pin              # pin everything unpinned
+grip pin --dry-run    # preview changes without modifying grip.toml
+```
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Print what would be pinned without writing `grip.toml` |
 
 ---
 

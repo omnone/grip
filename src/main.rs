@@ -134,7 +134,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
         Commands::List { all } => cmd_list(root, all, &cfg)?,
         Commands::Update { name, all } => cmd_update(name, all, root, &cfg).await?,
         Commands::Outdated { tag } => cmd_outdated(tag, root, &cfg).await?,
-        Commands::Doctor => cmd_doctor(root, &cfg)?,
+        Commands::Pin { dry_run } => cmd_pin(dry_run, root, &cfg)?,
         Commands::Env { shell } => cmd_env(shell, root, &cfg)?,
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
         Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
@@ -192,23 +192,9 @@ fn cmd_check_print(
     use std::collections::HashSet;
     let no_sha: HashSet<&str> = r.no_checksum.iter().map(|s| s.as_str()).collect();
 
-    if r.declared == 0 {
+    if r.declared == 0 && r.issues.is_empty() {
         if !cfg.quiet {
             println!("No binaries declared in grip.toml.");
-        }
-        return Ok(());
-    }
-
-    if r.examined == 0 {
-        if !cfg.quiet {
-            println!("No binaries matched this check (platform or --tag filter).");
-            println!(
-                "hint: {}",
-                output::dim(
-                    color_out,
-                    "Adjust `platforms` / `tags` in grip.toml or run without `--tag`.",
-                )
-            );
         }
         return Ok(());
     }
@@ -220,35 +206,62 @@ fn cmd_check_print(
         for (name, msg) in &r.warned {
             eprintln!("warning: {name}: {msg}");
         }
+        for issue in &r.issues {
+            eprintln!("warning: {issue}");
+        }
     } else {
-        println!();
-        let header = output::dim(color_out, "Checking installed binaries…");
-        println!("  {header}");
-        println!();
+        if r.examined > 0 {
+            println!();
+            let header = output::dim(color_out, "Checking installed binaries…");
+            println!("  {header}");
+            println!();
 
-        for name in &r.passed {
-            let mark = output::success_checkmark(color_out);
-            if no_sha.contains(name.as_str()) {
-                let note = output::dim(color_out, "(no sha256 in lock)");
-                println!("  {mark}  {name}  {note}");
-            } else {
-                println!("  {mark}  {name}");
+            for name in &r.passed {
+                let mark = output::success_checkmark(color_out);
+                if no_sha.contains(name.as_str()) {
+                    let note = output::dim(color_out, "(no sha256 in lock)");
+                    println!("  {mark}  {name}  {note}");
+                } else {
+                    println!("  {mark}  {name}");
+                }
             }
+
+            for (name, msg) in &r.warned {
+                let g = output::warn_glyph(color_err);
+                eprintln!("  {g}  {name}: {msg}");
+            }
+            for (name, msg) in &r.failed {
+                let x = output::fail_glyph(color_err);
+                eprintln!("  {x}  {name}: {msg}");
+            }
+        } else if r.declared > 0 {
+            println!();
+            println!("  No binaries matched this check (platform or --tag filter).");
+            println!(
+                "  hint: {}",
+                output::dim(
+                    color_out,
+                    "Adjust `platforms` / `tags` in grip.toml or run without `--tag`.",
+                )
+            );
         }
 
-        for (name, msg) in &r.warned {
-            let g = output::warn_glyph(color_err);
-            eprintln!("  {g}  {name}: {msg}");
-        }
-        for (name, msg) in &r.failed {
-            let x = output::fail_glyph(color_err);
-            eprintln!("  {x}  {name}: {msg}");
+        if !r.issues.is_empty() {
+            println!();
+            let issues_header = output::dim(color_out, "Consistency issues");
+            println!("  {issues_header}");
+            println!();
+            for issue in &r.issues {
+                let w = output::warn_glyph(color_err);
+                eprintln!("  {w}  {issue}");
+            }
         }
 
         let n_ok = r.passed.len();
         let n_warn = r.warned.len();
         let n_fail = r.failed.len();
-        let summary = if n_fail == 0 && n_warn == 0 {
+        let n_issues = r.issues.len();
+        let summary = if n_fail == 0 && n_warn == 0 && n_issues == 0 {
             output::green(color_out, &format!("All {n_ok} checks passed"))
         } else {
             let mut parts = Vec::new();
@@ -261,12 +274,18 @@ fn cmd_check_print(
             if n_fail > 0 {
                 parts.push(output::red(color_out, &format!("{n_fail} failed")));
             }
+            if n_issues > 0 {
+                parts.push(output::yellow(
+                    color_out,
+                    &format!("{n_issues} consistency issue{}", if n_issues == 1 { "" } else { "s" }),
+                ));
+            }
             parts.join(", ")
         };
         println!("\n  {summary}");
     }
 
-    if !r.failed.is_empty() {
+    if !r.failed.is_empty() || !r.issues.is_empty() {
         std::process::exit(1);
     }
 
@@ -1161,7 +1180,12 @@ fn cmd_lock(
     Ok(())
 }
 
-fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), GripError> {
+/// Pin all unpinned entries in `grip.toml` to their currently installed versions from `grip.lock`.
+fn cmd_pin(
+    dry_run: bool,
+    root: Option<std::path::PathBuf>,
+    cfg: &OutputCfg,
+) -> Result<(), GripError> {
     let project_root = match root {
         Some(r) => r,
         None => {
@@ -1171,154 +1195,139 @@ fn cmd_doctor(root: Option<std::path::PathBuf>, cfg: &OutputCfg) -> Result<(), G
     };
     let manifest_path = project_root.join("grip.toml");
     let lock_path = project_root.join("grip.lock");
-    let bin_dir = project_root.join(".bin");
     let color = cfg.use_color_stdout();
 
-    let manifest = Manifest::load(&manifest_path)?;
+    let mut manifest = Manifest::load(&manifest_path)?;
     let lock = LockFile::load(&lock_path)?;
 
-    let mut issues: Vec<String> = Vec::new();
+    let mut pinned: Vec<(String, String)> = Vec::new();
+    let mut not_installed: Vec<String> = Vec::new();
 
-    // 1. Orphaned binary lock entries (in lock but not in manifest).
-    for entry in &lock.entries {
-        if !manifest.binaries.contains_key(&entry.name) {
-            issues.push(format!(
-                "binary '{}' is in grip.lock but not in grip.toml (run `grip remove {}`)",
-                entry.name, entry.name
-            ));
-        }
-    }
+    // Collect pins for binaries first (can't iterate + mutate at same time).
+    let bin_pins: Vec<(String, Option<String>)> = manifest
+        .binaries
+        .iter()
+        .filter(|(_, entry)| !entry.is_version_pinned())
+        .map(|(name, _)| {
+            let ver = lock.get(name).map(|e| e.version.clone());
+            (name.clone(), ver)
+        })
+        .collect();
 
-    // 2. Orphaned library lock entries.
-    for entry in &lock.library_entries {
-        if !manifest.libraries.contains_key(&entry.name) {
-            issues.push(format!(
-                "library '{}' is in grip.lock but not in grip.toml (run `grip remove {} --library`)",
-                entry.name, entry.name
-            ));
-        }
-    }
-
-    // 3. Binaries declared but not installed (not in lock).
-    for name in manifest.binaries.keys() {
-        if lock.get(name).is_none() {
-            issues.push(format!(
-                "binary '{name}' is declared in grip.toml but not installed (run `grip sync`)"
-            ));
-        }
-    }
-
-    // 4. Libraries declared but not installed.
-    for name in manifest.libraries.keys() {
-        if lock.get_library(name).is_none() {
-            issues.push(format!(
-                "library '{name}' is declared in grip.toml but not installed (run `grip sync`)"
-            ));
-        }
-    }
-
-    // 5. Binary in lock but .bin/ file missing.
-    for entry in &lock.entries {
-        let bin_path = bin_dir.join(&entry.name);
-        if !bin_path.exists() && bin_path.symlink_metadata().is_err() {
-            issues.push(format!(
-                "binary '{}' is in grip.lock but missing from .bin/ (run `grip sync`)",
-                entry.name
-            ));
-        }
-    }
-
-    // 6. SHA256 drift — binary on disk doesn't match lock.
-    for entry in &lock.entries {
-        if let Some(expected) = &entry.sha256 {
-            let bin_path = bin_dir.join(&entry.name);
-            if bin_path.exists() {
-                if let Ok(got) = crate::checksum::sha256_file(&bin_path) {
-                    if &got != expected {
-                        issues.push(format!(
-                            "binary '{}' checksum mismatch — binary may have been modified (run `grip sync --verify`)",
-                            entry.name
-                        ));
+    for (name, ver) in bin_pins {
+        match ver {
+            Some(version) => {
+                pinned.push((name.clone(), version.clone()));
+                if !dry_run {
+                    if let Some(entry) = manifest.binaries.get_mut(&name) {
+                        *entry = entry.pin_version(&version);
                     }
                 }
             }
+            None => not_installed.push(name),
         }
     }
 
-    // 8. Binary lock entry missing sha256 for sources that always record one.
-    //    This can indicate the lock file was hand-edited to remove integrity data.
-    const SHA256_SOURCES: &[&str] = &["github", "url"];
-    for entry in &lock.entries {
-        if entry.sha256.is_none() && SHA256_SOURCES.contains(&entry.source.as_str()) {
-            issues.push(format!(
-                "binary '{}' (source: {}) has no sha256 in grip.lock — \
-                 lock may have been edited; run `grip update {}` to refresh",
-                entry.name, entry.source, entry.name
-            ));
-        }
-    }
+    // Collect pins for libraries.
+    let lib_pins: Vec<(String, Option<String>)> = manifest
+        .libraries
+        .iter()
+        .filter(|(_, entry)| match entry {
+            LibraryEntry::Apt(a) => a.version.is_none(),
+            LibraryEntry::Dnf(d) => d.version.is_none(),
+        })
+        .map(|(name, _)| {
+            let ver = lock.get_library(name).map(|e| e.version.clone());
+            (name.clone(), ver)
+        })
+        .collect();
 
-    // 9. Library in lock but not found on system.
-    for entry in &lock.library_entries {
-        if let Some(lib) = manifest.libraries.get(&entry.name) {
-            let on_system = match lib {
-                LibraryEntry::Apt(a) => std::process::Command::new("dpkg-query")
-                    .args(["-W", "-f=${Status}", &a.package])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
-                    .unwrap_or(false),
-                LibraryEntry::Dnf(d) => std::process::Command::new("rpm")
-                    .args(["-q", &d.package])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false),
-            };
-            if !on_system {
-                issues.push(format!(
-                    "library '{}' is in grip.lock but not found on the system (run `grip sync`)",
-                    entry.name
-                ));
+    for (name, ver) in lib_pins {
+        match ver {
+            Some(version) => {
+                pinned.push((name.clone(), version.clone()));
+                if !dry_run {
+                    if let Some(entry) = manifest.libraries.get_mut(&name) {
+                        match entry {
+                            LibraryEntry::Apt(a) => a.version = Some(version),
+                            LibraryEntry::Dnf(d) => d.version = Some(version),
+                        }
+                    }
+                }
             }
+            None => not_installed.push(name),
         }
     }
 
-    // 10. Unpinned entries — floating versions can silently upgrade to a compromised release.
-    for (name, entry) in &manifest.binaries {
-        if !entry.is_version_pinned() {
-            issues.push(format!(
-                "binary '{name}' ({}) has no version pin — \
-                 run `grip add {name}@<version>` to pin it (use `grip sync --require-pins` in CI)",
-                entry.source_label(),
-            ));
-        }
+    if !dry_run && !pinned.is_empty() {
+        manifest.save(&manifest_path)?;
     }
 
-    if !cfg.quiet {
+    if cfg.quiet {
+        for (name, version) in &pinned {
+            println!("{name} {version}");
+        }
+        for name in &not_installed {
+            eprintln!("warning: {name}: not installed, skipped");
+        }
+        return Ok(());
+    }
+
+    if pinned.is_empty() && not_installed.is_empty() {
+        println!("All entries are already pinned.");
+        return Ok(());
+    }
+
+    if !pinned.is_empty() {
         println!();
-        let header = output::dim(color, "grip doctor");
+        let header = if dry_run {
+            output::dim(color, "Would pin (dry run)")
+        } else {
+            output::dim(color, "Pinned")
+        };
         println!("  {header}");
         println!();
-        if issues.is_empty() {
-            let check = output::success_checkmark(color);
-            println!("  {check}  All checks passed");
-        } else {
-            for issue in &issues {
-                let w = output::warn_glyph(color);
-                println!("  {w}  {issue}");
-            }
-            println!();
-            let summary = output::yellow(color, &format!("{} issue(s) found", issues.len()));
-            println!("  {summary}");
-        }
-        println!();
-    } else {
-        for issue in &issues {
-            eprintln!("warning: {issue}");
+        for (name, version) in &pinned {
+            let mark = output::success_checkmark(color);
+            println!("  {mark}  {name}  →  {version}");
         }
     }
 
-    if !issues.is_empty() {
-        std::process::exit(1);
+    if !not_installed.is_empty() {
+        println!();
+        let warn_header = output::dim(color, "Not installed — skipped");
+        println!("  {warn_header}");
+        println!();
+        for name in &not_installed {
+            let g = output::warn_glyph(color);
+            println!("  {g}  {name}");
+        }
+        println!(
+            "\n  hint: {}",
+            output::dim(color, "run `grip sync` to install, then `grip pin` to pin")
+        );
+    }
+
+    if !pinned.is_empty() {
+        let n = pinned.len();
+        let summary = if dry_run {
+            output::dim(
+                color,
+                &format!(
+                    "{n} entr{} would be pinned (re-run without --dry-run to apply)",
+                    if n == 1 { "y" } else { "ies" }
+                ),
+            )
+        } else {
+            output::green(
+                color,
+                &format!(
+                    "{n} entr{} pinned in grip.toml",
+                    if n == 1 { "y" } else { "ies" }
+                ),
+            )
+        };
+        println!("\n  {summary}");
     }
 
     Ok(())

@@ -43,6 +43,8 @@ pub struct CheckResult {
     pub warned: Vec<(String, String)>,
     /// Names that passed but lock had no SHA256 to verify.
     pub no_checksum: Vec<String>,
+    /// Global consistency issues (orphaned lock entries, unpinned versions, missing sha256).
+    pub issues: Vec<String>,
 }
 
 /// Compare manifest-pinned version to lock file version (normalizes leading `v`, case-insensitive).
@@ -292,6 +294,51 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
                 // Libraries have no extra binaries or checksums; these branches are unreachable.
                 out.passed.push(name.clone());
             }
+        }
+    }
+
+    // ── Global consistency checks (formerly `grip doctor`) ──────────────────
+    // These are not per-entry — they check the overall state of the three files.
+    // Tag filters do not apply here.
+
+    // Orphaned binary lock entries (in lock but not in manifest).
+    for entry in &lock.entries {
+        if !manifest.binaries.contains_key(&entry.name) {
+            out.issues.push(format!(
+                "binary '{}' is in grip.lock but not in grip.toml — run `grip remove {}`",
+                entry.name, entry.name,
+            ));
+        }
+    }
+
+    // Orphaned library lock entries.
+    for entry in &lock.library_entries {
+        if !manifest.libraries.contains_key(&entry.name) {
+            out.issues.push(format!(
+                "library '{}' is in grip.lock but not in grip.toml — run `grip remove {} --library`",
+                entry.name, entry.name,
+            ));
+        }
+    }
+
+    // Unpinned entries — floating versions can silently upgrade to a compromised release.
+    for (name, entry) in &manifest.binaries {
+        if !entry.is_version_pinned() {
+            out.issues.push(format!(
+                "binary '{name}' ({}) has no version pin — run `grip pin` to fix",
+                entry.source_label(),
+            ));
+        }
+    }
+
+    // Lock entries for github/url sources that are missing a sha256 (possible hand-edit).
+    const SHA256_SOURCES: &[&str] = &["github", "url"];
+    for entry in &lock.entries {
+        if entry.sha256.is_none() && SHA256_SOURCES.contains(&entry.source.as_str()) {
+            out.issues.push(format!(
+                "binary '{}' (source: {}) has no sha256 in grip.lock — run `grip update {}` to refresh",
+                entry.name, entry.source, entry.name,
+            ));
         }
     }
 
