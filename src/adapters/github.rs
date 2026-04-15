@@ -140,7 +140,7 @@ impl SourceAdapter for GithubAdapter {
 
         // Download (or use cached archive)
         let tmp = tempfile::NamedTempFile::new()?;
-        let sha256 = if let Some(cache) = &self.cache {
+        let _archive_sha256 = if let Some(cache) = &self.cache {
             if let Some(cached) = cache.lookup(&download_url) {
                 pb.set_message(format!("{name}  {asset_name} (cached)"));
                 std::fs::copy(&cached, tmp.path())?;
@@ -248,6 +248,16 @@ impl SourceAdapter for GithubAdapter {
         pb.set_message(format!("{name}  extracting..."));
         let extra_installed = extract_binary(tmp.path(), &asset_name, g, name, bin_dir)?;
 
+        // Hash the installed binary, not the archive, so `grip lock verify` can re-check it.
+        let binary_sha256 = crate::checksum::sha256_file(&bin_dir.join(name))
+            .map_err(GripError::Io)?;
+
+        // Symlink into ~/.local/bin/ so the binary is on PATH without `grip env`.
+        crate::bin_dir::link_to_user_path(bin_dir, name).ok();
+        for extra in &extra_installed {
+            crate::bin_dir::link_to_user_path(bin_dir, extra).ok();
+        }
+
         pb.finish_with_message(format!(
             "{} {name}  {version}",
             output::success_checkmark(colored)
@@ -257,7 +267,7 @@ impl SourceAdapter for GithubAdapter {
             version,
             source: "github".to_string(),
             url: Some(download_url),
-            sha256: Some(sha256),
+            sha256: Some(binary_sha256),
             installed_at: chrono::Utc::now(),
             extra_binaries: extra_installed,
             auto_binary: None,

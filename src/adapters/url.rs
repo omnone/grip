@@ -158,6 +158,12 @@ impl SourceAdapter for UrlAdapter {
             copy_binary(tmp.path(), bin_dir, name)?;
         }
 
+        // Symlink into ~/.local/bin/ so the binary is on PATH without `grip env`.
+        crate::bin_dir::link_to_user_path(bin_dir, name).ok();
+        for extra in &extra_installed {
+            crate::bin_dir::link_to_user_path(bin_dir, extra).ok();
+        }
+
         let version: String = sha256.chars().take(12).collect();
         pb.finish_with_message(format!(
             "{} {name}  {version}",

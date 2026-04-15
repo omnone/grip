@@ -50,6 +50,29 @@ pub fn sha256_of_installed(bin_dir: &Path, name: &str) -> Option<String> {
     crate::checksum::sha256_file(&real).ok()
 }
 
+/// Symlink `~/.local/bin/<name>` → the absolute path of the installed binary in `bin_dir`.
+/// Creates `~/.local/bin/` if it does not exist.
+/// No-op when `$HOME` is unset or on non-Unix platforms.
+pub fn link_to_user_path(bin_dir: &Path, name: &str) -> Result<(), GripError> {
+    #[cfg(unix)]
+    {
+        let home = match std::env::var_os("HOME") {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+        let local_bin = std::path::Path::new(&home).join(".local/bin");
+        fs::create_dir_all(&local_bin)?;
+        let target = fs::canonicalize(bin_dir.join(name))
+            .unwrap_or_else(|_| bin_dir.join(name));
+        let link = local_bin.join(name);
+        if link.exists() || link.is_symlink() {
+            fs::remove_file(&link)?;
+        }
+        std::os::unix::fs::symlink(&target, &link)?;
+    }
+    Ok(())
+}
+
 /// Set the executable bit (`0o755`) on a file. No-op on non-Unix platforms.
 pub fn make_executable(path: &Path) -> Result<(), GripError> {
     #[cfg(unix)]
