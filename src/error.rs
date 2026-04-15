@@ -53,6 +53,15 @@ pub enum GripError {
          then pin them with `grip add <name>@<version>`."
     )]
     UnpinnedEntries { names: String },
+    /// `--repo` was not provided for a GitHub source entry.
+    #[error("--repo required for github source (or use `grip add owner/repo`)")]
+    RepoRequired,
+    /// `--url` was not provided for a url source entry.
+    #[error("--url required for url source")]
+    UrlRequired,
+    /// The named entry was not found in `grip.toml`.
+    #[error("'{0}' not found in grip.toml")]
+    EntryNotFound(String),
     /// A catch-all for errors that don't fit the variants above.
     #[error("{0}")]
     Other(String),
@@ -101,15 +110,15 @@ impl GripError {
                 "Pin each entry by adding a version: `grip add <name>@<version>`, \
                  or remove `--require-pins` to allow floating versions.",
             ),
-            GripError::CommandFailed(_) => Some("Inspect the command output above; fix install_cmd or package name."),
+            GripError::CommandFailed(_) => Some("Inspect the command output above; fix the package name or source configuration."),
             GripError::Io(_) => Some("Check file permissions and paths (use -v for more detail)."),
             GripError::Http(_) => Some("Check your network and proxy settings (use -v for more detail)."),
             GripError::TomlSerialize(_) => Some("If this persists, report a bug with your grip.toml contents."),
-            GripError::Other(s) if s.contains("--repo required") => {
+            GripError::RepoRequired => {
                 Some("For GitHub, pass `--repo owner/name` or use `grip add owner/repo`.")
             }
-            GripError::Other(s) if s.contains("--url required") => Some("Pass `--url` for url source."),
-            GripError::Other(s) if s.contains("not found in grip.toml") => {
+            GripError::UrlRequired => Some("Pass `--url` for url source."),
+            GripError::EntryNotFound(_) => {
                 Some("List entries in grip.toml or run `grip add <name>` first.")
             }
             _ => None,
@@ -247,21 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn other_repo_required_has_hint() {
-        let err = GripError::Other("--repo required for GitHub".into());
-        assert!(err.hint().is_some());
+    fn repo_required_has_hint() {
+        assert!(GripError::RepoRequired.hint().is_some());
     }
 
     #[test]
-    fn other_url_required_has_hint() {
-        let err = GripError::Other("--url required for url source".into());
-        assert!(err.hint().is_some());
+    fn url_required_has_hint() {
+        assert!(GripError::UrlRequired.hint().is_some());
     }
 
     #[test]
-    fn other_not_found_in_grip_toml_has_hint() {
-        let err = GripError::Other("jq not found in grip.toml".into());
-        assert!(err.hint().is_some());
+    fn entry_not_found_has_hint() {
+        assert!(GripError::EntryNotFound("jq".into()).hint().is_some());
+    }
+
+    #[test]
+    fn entry_not_found_message_contains_name() {
+        let err = GripError::EntryNotFound("jq".into());
+        assert!(err.to_string().contains("jq"));
     }
 
     // ── format_user_message ───────────────────────────────────────────────────

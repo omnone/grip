@@ -101,57 +101,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             let start = std::time::Instant::now();
             let result = installer::run_install(false, false, None, root_for_sync, ui).await?;
             let elapsed = start.elapsed().as_secs_f64();
-            if cfg.quiet {
-                for (name, err) in &result.failed {
-                    eprintln!("error: {name}: {err}");
-                }
-            } else {
-                for (name, detected) in &result.binary_overrides {
-                    let check = output::success_checkmark(color_err);
-                    eprintln!(
-                        "  {check}  {name}: auto-detected binary `{detected}`; \
-                         updated grip.toml"
-                    );
-                }
-                for (name, extras) in &result.extra_binary_overrides {
-                    let check = output::success_checkmark(color_err);
-                    let list = extras.join(", ");
-                    eprintln!(
-                        "  {check}  {name}: auto-detected extra binaries [{list}]; \
-                         updated grip.toml"
-                    );
-                }
-                for (name, err) in &result.warned {
-                    let g = output::warn_glyph(color_err);
-                    eprintln!("  {g}  {name}: {err}");
-                }
-                for (name, err) in &result.failed {
-                    let x = output::fail_glyph(color_err);
-                    eprintln!("  {x}  {name}: {err}");
-                }
-                let n_installed = result.installed.len();
-                let n_skipped = result.skipped.len();
-                let n_failed = result.failed.len() + result.warned.len();
-                if n_installed == 0 && n_failed == 0 {
-                    let dim = output::dim(color_out, "All up to date");
-                    println!("\n  {dim}  ({n_skipped} skipped, {elapsed:.1}s)");
-                } else {
-                    let mut parts: Vec<String> = Vec::new();
-                    if n_installed > 0 {
-                        parts.push(output::green(
-                            color_out,
-                            &format!("{n_installed} installed"),
-                        ));
-                    }
-                    if n_skipped > 0 {
-                        parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
-                    }
-                    if n_failed > 0 {
-                        parts.push(output::red(color_out, &format!("{n_failed} failed")));
-                    }
-                    println!("\n  {}  ({elapsed:.1}s)", parts.join(", "));
-                }
-            }
+            print_install_result(&result, &cfg, color_out, color_err, elapsed);
             if !result.failed.is_empty() {
                 std::process::exit(1);
             }
@@ -170,61 +120,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             };
             let result = installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
             let elapsed = start.elapsed().as_secs_f64();
-
-            if cfg.quiet {
-                for (name, err) in &result.failed {
-                    eprintln!("error: {name}: {err}");
-                }
-            } else {
-                for (name, detected) in &result.binary_overrides {
-                    let check = output::success_checkmark(color_err);
-                    eprintln!(
-                        "  {check}  {name}: auto-detected binary `{detected}`; \
-                         updated grip.toml"
-                    );
-                }
-                for (name, extras) in &result.extra_binary_overrides {
-                    let check = output::success_checkmark(color_err);
-                    let list = extras.join(", ");
-                    eprintln!(
-                        "  {check}  {name}: auto-detected extra binaries [{list}]; \
-                         updated grip.toml"
-                    );
-                }
-                for (name, err) in &result.warned {
-                    let g = output::warn_glyph(color_err);
-                    eprintln!("  {g}  {name}: {err}");
-                }
-                for (name, err) in &result.failed {
-                    let x = output::fail_glyph(color_err);
-                    eprintln!("  {x}  {name}: {err}");
-                }
-
-                let n_installed = result.installed.len();
-                let n_skipped = result.skipped.len();
-                let n_failed = result.failed.len() + result.warned.len();
-
-                if n_installed == 0 && n_failed == 0 {
-                    let dim = output::dim(color_out, "All up to date");
-                    println!("\n  {dim}  ({n_skipped} skipped, {elapsed:.1}s)");
-                } else {
-                    let mut parts: Vec<String> = Vec::new();
-                    if n_installed > 0 {
-                        parts.push(output::green(
-                            color_out,
-                            &format!("{n_installed} installed"),
-                        ));
-                    }
-                    if n_skipped > 0 {
-                        parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
-                    }
-                    if n_failed > 0 {
-                        parts.push(output::red(color_out, &format!("{n_failed} failed")));
-                    }
-                    println!("\n  {}  ({elapsed:.1}s)", parts.join(", "));
-                }
-            }
-
+            print_install_result(&result, &cfg, color_out, color_err, elapsed);
             if !result.failed.is_empty() {
                 std::process::exit(1);
             }
@@ -596,11 +492,7 @@ fn cmd_add(
             meta: Default::default(),
         }),
         "github" => BinaryEntry::Github(GithubEntry {
-            repo: repo_resolved.ok_or_else(|| {
-                GripError::Other(
-                    "--repo required for github source (or use `grip add owner/repo`)".into(),
-                )
-            })?,
+            repo: repo_resolved.ok_or(GripError::RepoRequired)?,
             version,
             asset_pattern: None,
             binary: None,
@@ -611,7 +503,7 @@ fn cmd_add(
             meta: Default::default(),
         }),
         "url" => BinaryEntry::Url(UrlEntry {
-            url: url.ok_or_else(|| GripError::Other("--url required for url source".into()))?,
+            url: url.ok_or(GripError::UrlRequired)?,
             binary: None,
             extra_binaries: None,
             sha256: None,
@@ -726,15 +618,18 @@ fn cmd_run(args: Vec<String>, root: Option<std::path::PathBuf>) -> Result<(), Gr
     let path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", bin_dir.display(), path);
 
-    let status = std::process::Command::new(&args[0])
+    let cmd = args
+        .first()
+        .ok_or_else(|| GripError::Other("no command given to `grip run`".into()))?;
+
+    let status = std::process::Command::new(cmd)
         .args(&args[1..])
         .env("PATH", new_path)
         .status()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 GripError::Other(format!(
-                    "'{}' not found — run `grip add {}` then `grip sync` to install it",
-                    args[0], args[0]
+                    "'{cmd}' not found — run `grip add {cmd}` then `grip sync` to install it"
                 ))
             } else {
                 GripError::Io(e)
@@ -753,12 +648,7 @@ fn detect_default_source() -> Result<String, GripError> {
     let platform = platform::Platform::current();
     if platform.is_linux() {
         for cmd in &["dnf", "apt-get", "apt"] {
-            if std::process::Command::new("which")
-                .arg(cmd)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            {
+            if installer::which_exists(cmd) {
                 return Ok(match *cmd {
                     "dnf" => "dnf",
                     _ => "apt",
@@ -1155,6 +1045,49 @@ async fn cmd_outdated(
                 );
             }
         }
+    } else {
+        // Quiet / machine-readable: tab-separated lines — name, installed, latest, status.
+        let norm = |s: &str| s.trim_start_matches('v').to_lowercase();
+        for (name, _) in &entries {
+            let installed = lock.get(name).map(|e| e.version.as_str()).unwrap_or("-");
+            let latest = latest_map.get(name).and_then(|o| o.as_deref()).unwrap_or("-");
+            let status = if latest == "-" {
+                "unknown"
+            } else if installed == "-" {
+                "not-installed"
+            } else if norm(installed) == norm(latest) {
+                "up-to-date"
+            } else {
+                "outdated"
+            };
+            println!("{name}\t{installed}\t{latest}\t{status}");
+        }
+
+        let lib_entries: Vec<(&String, &config::manifest::LibraryEntry)> = manifest
+            .libraries
+            .iter()
+            .filter(|(_, e)| e.meta().matches_platform(platform.os_str()))
+            .filter(|(_, e)| tag.as_deref().map(|t| e.meta().has_tag(t)).unwrap_or(true))
+            .collect();
+
+        for (name, entry) in &lib_entries {
+            let locked = lock.get_library(name).map(|e| e.version.as_str()).unwrap_or("-");
+            let system_ver: Option<String> = match entry {
+                config::manifest::LibraryEntry::Apt(a) => {
+                    crate::adapters::apt::installed_version(&a.package)
+                }
+                config::manifest::LibraryEntry::Dnf(d) => {
+                    crate::adapters::dnf::installed_version(&d.package)
+                }
+            };
+            let system = system_ver.as_deref().unwrap_or("-");
+            let status = match &system_ver {
+                None => "not-installed",
+                Some(v) if norm(locked) == norm(v) => "in-sync",
+                _ => "drifted",
+            };
+            println!("{name}\t{locked}\t{system}\t{status}");
+        }
     }
 
     Ok(())
@@ -1536,7 +1469,7 @@ async fn cmd_update_one(
     let entry = manifest
         .binaries
         .get(&name)
-        .ok_or_else(|| GripError::Other(format!("'{name}' not found in grip.toml")))?
+        .ok_or_else(|| GripError::EntryNotFound(name.clone()))?
         .clone();
 
     let old_version = lock.get(&name).map(|e| e.version.clone());
@@ -1973,6 +1906,62 @@ fn cmd_export(
 
     let _ = cfg;
     Ok(())
+}
+
+/// Print the result of a `sync` or `add` install pass (quiet and verbose paths).
+fn print_install_result(
+    result: &installer::InstallResult,
+    cfg: &OutputCfg,
+    color_out: bool,
+    color_err: bool,
+    elapsed: f64,
+) {
+    if cfg.quiet {
+        for (name, err) in &result.failed {
+            eprintln!("error: {name}: {err}");
+        }
+        return;
+    }
+    for (name, detected) in &result.binary_overrides {
+        let check = output::success_checkmark(color_err);
+        eprintln!(
+            "  {check}  {name}: auto-detected binary `{detected}`; updated grip.toml"
+        );
+    }
+    for (name, extras) in &result.extra_binary_overrides {
+        let check = output::success_checkmark(color_err);
+        let list = extras.join(", ");
+        eprintln!(
+            "  {check}  {name}: auto-detected extra binaries [{list}]; updated grip.toml"
+        );
+    }
+    for (name, err) in &result.warned {
+        let g = output::warn_glyph(color_err);
+        eprintln!("  {g}  {name}: {err}");
+    }
+    for (name, err) in &result.failed {
+        let x = output::fail_glyph(color_err);
+        eprintln!("  {x}  {name}: {err}");
+    }
+    let n_installed = result.installed.len();
+    let n_skipped = result.skipped.len();
+    let n_failed = result.failed.len() + result.warned.len();
+    if n_installed == 0 && n_failed == 0 {
+        let dim = output::dim(color_out, "All up to date");
+        println!("\n  {dim}  ({n_skipped} skipped, {elapsed:.1}s)");
+    } else {
+        let mut parts: Vec<String> = Vec::new();
+        if n_installed > 0 {
+            parts.push(output::green(color_out, &format!("{n_installed} installed")));
+        }
+        if n_skipped > 0 {
+            parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
+        }
+        if n_failed > 0 {
+            parts.push(output::red(color_out, &format!("{n_failed} failed")));
+        }
+        println!("\n  {}  ({elapsed:.1}s)", parts.join(", "));
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

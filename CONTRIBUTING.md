@@ -75,7 +75,6 @@ tests/
 ├── integration_dnf.rs
 ├── integration_github.rs
 ├── integration_url.rs
-├── integration_shell.rs
 └── docker/          # One Dockerfile per integration suite
 ```
 

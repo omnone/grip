@@ -43,7 +43,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
     /// When to use colors for grip output (`always` by default; respect NO_COLOR).
-    #[arg(long, global = true, value_name = "WHEN", default_value_t = ColorWhen::Always)]
+    #[arg(long, global = true, value_name = "WHEN", default_value_t = ColorWhen::Auto)]
     pub color: ColorWhen,
     /// Override the project root directory (skips the grip.toml walk).
     /// Useful inside containers where the project root is known.

@@ -23,9 +23,6 @@ pub struct CommonMeta {
     /// Omit to install on all platforms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<String>>,
-    /// Shell command to run after a successful install.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_install: Option<String>,
     /// If false, a failure is a warning rather than a hard error. Defaults to true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
@@ -328,7 +325,6 @@ mod tests {
             required,
             platforms: platforms.map(|v| v.into_iter().map(String::from).collect()),
             tags: tags.map(|v| v.into_iter().map(String::from).collect()),
-            post_install: None,
         }
     }
 
@@ -505,7 +501,6 @@ mod tests {
             required: Some(false),
             platforms: None,
             tags: None,
-            post_install: None,
         };
         let entry = BinaryEntry::Github(GithubEntry {
             repo: "a/b".to_string(),

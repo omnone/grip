@@ -7,9 +7,9 @@ use clap::ValueEnum;
 /// When to emit ANSI colors for grip-controlled output (not clap's own help colors).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorWhen {
-    Auto,
-    /// Emit ANSI colors whenever NO_COLOR is unset (default).
+    /// Emit ANSI colors only when output is a TTY and NO_COLOR is unset (default).
     #[default]
+    Auto,
     Always,
     Never,
 }
@@ -205,10 +205,10 @@ mod tests {
         assert_eq!(ColorWhen::Never.to_string(), "never");
     }
 
-    // ── OutputCfg default color is Always ─────────────────────────────────────
+    // ── ColorWhen default ─────────────────────────────────────────────────────
 
     #[test]
-    fn color_when_default_is_always() {
-        assert_eq!(ColorWhen::default(), ColorWhen::Always);
+    fn color_when_default_is_auto() {
+        assert_eq!(ColorWhen::default(), ColorWhen::Auto);
     }
 }

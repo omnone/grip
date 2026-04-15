@@ -485,7 +485,6 @@ All entry types support these fields:
 platforms    = ["linux", "darwin"]       # restrict to specific OSes (linux, darwin, windows)
 tags         = ["dev", "ci"]             # selective installs: grip sync --tag dev
 required     = false                     # warn instead of failing on error (default: true)
-post_install = "chmod +x .bin/mytool"   # shell command to run after a successful install
 ```
 
 ---

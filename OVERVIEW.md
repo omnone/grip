@@ -27,24 +27,21 @@ binaries-manager/
 │   │   ├── github.rs              # GitHub Releases adapter
 │   │   ├── url.rs                 # Direct URL downloader
 │   │   ├── apt.rs                 # APT package manager adapter
-│   │   ├── dnf.rs                 # DNF package manager adapter
-│   │   └── shell.rs               # Shell command executor (allow_shell guard)
+│   │   └── dnf.rs                 # DNF package manager adapter
 │   └── config/
 │       ├── mod.rs                 # Config module root
 │       ├── manifest.rs            # grip.toml TOML structs
 │       └── lockfile.rs            # grip.lock structs and I/O
 ├── tests/
-│   ├── integration_apt.rs         # APT adapter integration tests (272 lines)
-│   ├── integration_dnf.rs         # DNF adapter integration tests (272 lines)
-│   ├── integration_github.rs      # GitHub adapter integration tests (188 lines)
-│   ├── integration_url.rs         # URL adapter integration tests (159 lines)
-│   ├── integration_shell.rs       # Shell adapter integration tests (176 lines)
+│   ├── integration_apt.rs         # APT adapter integration tests
+│   ├── integration_dnf.rs         # DNF adapter integration tests
+│   ├── integration_github.rs      # GitHub adapter integration tests
+│   ├── integration_url.rs         # URL adapter integration tests
 │   └── docker/
 │       ├── Dockerfile.test-apt    # Debian Bookworm container for APT suite
 │       ├── Dockerfile.test-dnf    # Fedora 40 container for DNF suite
 │       ├── Dockerfile.test-github # Debian Bookworm container for GitHub suite
-│       ├── Dockerfile.test-url    # Debian Bookworm container for URL suite
-│       └── Dockerfile.test-shell  # Debian Bookworm container for Shell suite
+│       └── Dockerfile.test-url    # Debian Bookworm container for URL suite
 ├── Cargo.toml                     # Rust project metadata and dependencies
 ├── Cargo.lock                     # Locked Rust dependency versions
 ├── grip.toml                      # Example manifest
@@ -52,7 +49,7 @@ binaries-manager/
 ├── README.md                      # User documentation
 ├── OVERVIEW.md                    # This file — architecture reference
 ├── COMMANDS.md                    # Full CLI and grip.toml reference
-├── SECURITY.md                    # Security guide: GPG, allow_shell, lock verify, CI setup
+├── SECURITY.md                    # Security guide: GPG, lock verify, CI setup
 ├── CONTRIBUTING.md                # Contributor guide
 ├── LICENSE                        # MIT
 └── Makefile                       # Build + integration test targets
@@ -70,12 +67,11 @@ binaries-manager/
 | `checker.rs` | Validates `.bin/` against `grip.lock` (version, SHA256, presence) |
 | `lock_verify.rs` | Re-hashes `.bin/` against `grip.lock` without reading the manifest; backing logic for `grip lock verify` |
 | `gpg.rs` | GPG signature verification (Mode 1: direct `.sig`/`.asc`; Mode 2: signed checksums file); shared by GitHub and URL adapters |
-| `adapters/mod.rs` | `SourceAdapter` async trait that all 5 adapters implement |
+| `adapters/mod.rs` | `SourceAdapter` async trait that all 4 adapters implement |
 | `adapters/github.rs` | Resolves semver ranges, downloads GitHub release assets, extracts archives, calls `gpg.rs` if configured |
 | `adapters/apt.rs` | Invokes APT with privilege escalation checks, symlinks binary into `.bin/` |
 | `adapters/dnf.rs` | Same as APT but for DNF/RPM systems; uses PATH-search instead of `which` |
 | `adapters/url.rs` | HTTP downloads with optional SHA256 verification, caching, and GPG verification |
-| `adapters/shell.rs` | Enforces `allow_shell` guard; executes `install_cmd` with `GRIP_BIN_DIR` set |
 | `config/manifest.rs` | TOML deserialization for all entry types; `is_version_pinned()` and `source_label()` helpers |
 | `config/lockfile.rs` | TOML serialization, atomic writes, entry lookups for `grip.lock` |
 | `bin_dir.rs` | Creates `.bin/`, copies/symlinks binaries, sets executable bit |
@@ -175,7 +171,6 @@ User runs: grip sync / grip add / etc.
    │ Run pkg manager         │   extract, place binary       │
    │ Symlink to .bin/        │ URL: download, verify SHA,    │
    │                         │   extract, place binary       │
-   │                         │ Shell: exec install_cmd       │
    └─────────────────────────┴──────────────────────────────┘
          │
          ▼
@@ -327,19 +322,14 @@ Uses `indexmap::IndexMap` instead of `HashMap` to preserve the user's key orderi
 ### Docker Workflow
 `grip export --format dockerfile` generates native `RUN apt-get install` / `RUN curl` commands from the lock file, so Docker images don't need grip installed at build time.
 
-### Shell Adapter SHA-256
-After a shell `install_cmd` succeeds, grip computes the SHA-256 of the binary placed in `.bin/` (if any) and records it in `grip.lock`, enabling `grip check` to verify shell-installed binaries just like download-based ones.
-
 ### Supply Chain Attack Protections
-Four layered controls are implemented in `src/`:
+Three layered controls are implemented in `src/`:
 
-1. **`allow_shell` guard** (`adapters/shell.rs`) — shell entries are blocked unless `allow_shell = true` is explicitly set in `grip.toml`. Even then, an interactive TTY prompt shows the command and asks for confirmation. Protects against a malicious PR adding an `install_cmd`.
+1. **GPG signature verification** (`gpg.rs`) — two modes: direct binary signature (Mode 1) and signed checksums file (Mode 2, used by HashiCorp, Go, jq, etc.). Shared by `adapters/github.rs` and `adapters/url.rs`. Both modes use `verify_gpg_signature_with_cmd` / `verify_signed_checksums_with_cmd` internally, which accept a `gpg_cmd` parameter so tests can pass a non-existent binary name instead of mutating `PATH`.
 
-2. **GPG signature verification** (`gpg.rs`) — two modes: direct binary signature (Mode 1) and signed checksums file (Mode 2, used by HashiCorp, Go, jq, etc.). Shared by `adapters/github.rs` and `adapters/url.rs`. Both modes use `verify_gpg_signature_with_cmd` / `verify_signed_checksums_with_cmd` internally, which accept a `gpg_cmd` parameter so tests can pass a non-existent binary name instead of mutating `PATH`.
+2. **`grip lock verify`** (`lock_verify.rs`) — reads `grip.lock` directly (no manifest, no network), re-hashes every `.bin/` binary, and reports mismatches. Separates "is my setup complete?" (`grip check`) from "was anything tampered with after install?" (`grip lock verify`).
 
-3. **`grip lock verify`** (`lock_verify.rs`) — reads `grip.lock` directly (no manifest, no network), re-hashes every `.bin/` binary, and reports mismatches. Separates "is my setup complete?" (`grip check`) from "was anything tampered with after install?" (`grip lock verify`).
-
-4. **`--require-pins`** (`installer.rs`) — checked at the top of `run_install` before any network call. Uses `BinaryEntry::is_version_pinned()` from `config/manifest.rs`. `url` entries are always considered pinned (the URL is the artifact identifier); all other sources require an explicit `version` field.
+3. **`--require-pins`** (`installer.rs`) — checked at the top of `run_install` before any network call. Uses `BinaryEntry::is_version_pinned()` from `config/manifest.rs`. `url` entries are always considered pinned (the URL is the artifact identifier); all other sources require an explicit `version` field.
 
 ### Real apt/dnf Version Resolution
 `grip outdated` queries `apt-cache policy` (APT) and `dnf info` (DNF) to retrieve the actual repository candidate version rather than reporting a static `"latest"` string. Both fall back gracefully when the package manager is unavailable.
@@ -354,11 +344,10 @@ Downloads are keyed by SHA-256 of the URL string. Configurable via `$GRIP_CACHE_
 
 ## Test Suite
 
-grip has comprehensive integration tests covering all 5 adapters:
+grip has comprehensive integration tests covering all 4 adapters:
 
 | Suite | Container | Network | Tests |
 |-------|-----------|---------|-------|
-| `integration_shell` | Debian Bookworm | No | 7 |
 | `integration_apt` | Debian Bookworm | No (apt cache) | 11 |
 | `integration_dnf` | Fedora 40 | No (dnf cache) | 11 |
 | `integration_url` | Debian Bookworm | Yes | 6 |

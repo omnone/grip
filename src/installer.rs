@@ -119,7 +119,7 @@ pub async fn run_install(
         .collect();
 
     // First pass: split into skipped vs to-install.
-    let mut to_install: Vec<(String, _, Option<String>)> = Vec::new();
+    let mut to_install: Vec<(String, _)> = Vec::new();
 
     for (name, entry) in &manifest.binaries {
         let meta = entry.meta();
@@ -166,13 +166,13 @@ pub async fn run_install(
             }
         }
 
-        to_install.push((name.clone(), entry.clone(), meta.post_install.clone()));
+        to_install.push((name.clone(), entry.clone()));
     }
 
     // Split into system PM installs (apt/dnf — must be sequential to avoid lock contention)
     // and download-based installs (github/url — safe to run concurrently).
-    let mut pm_installs: Vec<(String, _, Option<String>)> = Vec::new();
-    let mut download_installs: Vec<(String, _, Option<String>)> = Vec::new();
+    let mut pm_installs: Vec<(String, _)> = Vec::new();
+    let mut download_installs: Vec<(String, _)> = Vec::new();
     for item in to_install {
         match &item.1 {
             crate::config::manifest::BinaryEntry::Apt(_)
@@ -197,7 +197,7 @@ pub async fn run_install(
     let mut pb_map: HashMap<String, ProgressBar> = HashMap::new();
 
     // ── Sequential pass: system package manager binaries ───────────────────
-    for (idx, (name, entry, post_install)) in pm_installs.into_iter().enumerate() {
+    for (idx, (name, entry)) in pm_installs.into_iter().enumerate() {
         let pb = if ui.quiet {
             ProgressBar::hidden()
         } else {
@@ -238,13 +238,10 @@ pub async fn run_install(
 
         handle_install_result(
             name,
-            post_install,
             res,
             &required_flags,
             &mut lock,
             &mut outcome,
-            &mp,
-            ui,
         );
     }
 
@@ -252,7 +249,7 @@ pub async fn run_install(
     let pm_count = pb_map.len(); // offset for display index
     let mut futures: FuturesUnordered<_> = FuturesUnordered::new();
 
-    for (idx, (name, entry, post_install)) in download_installs.into_iter().enumerate() {
+    for (idx, (name, entry)) in download_installs.into_iter().enumerate() {
         let pb = if ui.quiet {
             ProgressBar::hidden()
         } else {
@@ -291,7 +288,6 @@ pub async fn run_install(
                 ));
                 return (
                     name.clone(),
-                    post_install,
                     Err(GripError::UnsupportedPlatform {
                         adapter: adapter.name().to_string(),
                     }),
@@ -300,20 +296,17 @@ pub async fn run_install(
             let res = adapter
                 .install(&name, &entry, &bin_dir, &client, pb, colored)
                 .await;
-            (name, post_install, res)
+            (name, res)
         });
     }
 
-    while let Some((name, post_install, res)) = futures.next().await {
+    while let Some((name, res)) = futures.next().await {
         handle_install_result(
             name,
-            post_install,
             res,
             &required_flags,
             &mut lock,
             &mut outcome,
-            &mp,
-            ui,
         );
     }
 
@@ -324,7 +317,7 @@ pub async fn run_install(
         .map(|(n, e)| (n.clone(), e.meta().is_required()))
         .collect();
 
-    let mut libs_to_install: Vec<(String, LibraryEntry, Option<String>)> = Vec::new();
+    let mut libs_to_install: Vec<(String, LibraryEntry)> = Vec::new();
 
     for (name, entry) in &manifest.libraries {
         let meta = entry.meta();
@@ -341,11 +334,18 @@ pub async fn run_install(
         }
 
         if lock.get_library(name).is_some() {
-            outcome.skipped.push(name.clone());
-            continue;
+            let on_system = match entry {
+                LibraryEntry::Apt(a) => apt_adapter::installed_version(&a.package).is_some(),
+                LibraryEntry::Dnf(d) => dnf_adapter::installed_version(&d.package).is_some(),
+            };
+            if on_system {
+                outcome.skipped.push(name.clone());
+                continue;
+            }
+            // Lock entry exists but the library was removed from the system — reinstall.
         }
 
-        libs_to_install.push((name.clone(), entry.clone(), meta.post_install.clone()));
+        libs_to_install.push((name.clone(), entry.clone()));
     }
 
     let lib_total = libs_to_install.len();
@@ -360,7 +360,7 @@ pub async fn run_install(
     }
 
     // Libraries are installed sequentially to avoid package manager lock contention.
-    for (idx, (name, entry, post_install)) in libs_to_install.into_iter().enumerate() {
+    for (idx, (name, entry)) in libs_to_install.into_iter().enumerate() {
         let pb = if ui.quiet {
             indicatif::ProgressBar::hidden()
         } else {
@@ -396,33 +396,6 @@ pub async fn run_install(
 
         match result {
             Ok(lock_entry) => {
-                if let Some(cmd) = post_install {
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .status();
-                    match status {
-                        Ok(s) if !s.success() => {
-                            if ui.quiet {
-                                eprintln!("warning: post_install failed for {name}: {cmd}");
-                            } else {
-                                let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
-                                    .ok();
-                            }
-                        }
-                        Err(e) => {
-                            if ui.quiet {
-                                eprintln!("warning: post_install error for {name}: {e}");
-                            } else {
-                                let g = output::warn_glyph(ui.colored);
-                                mp.println(format!("  {g}  post_install error for {name}: {e}"))
-                                    .ok();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
                 outcome.installed.push(name);
                 lock.upsert_library(lock_entry);
             }
@@ -483,43 +456,13 @@ pub async fn run_install(
 /// Process the result of a single binary install and update `outcome` and `lock` accordingly.
 fn handle_install_result(
     name: String,
-    post_install: Option<String>,
     res: Result<crate::config::lockfile::LockEntry, GripError>,
     required_flags: &HashMap<String, bool>,
     lock: &mut crate::config::lockfile::LockFile,
     outcome: &mut InstallResult,
-    mp: &indicatif::MultiProgress,
-    ui: InstallOptions,
 ) {
     match res {
         Ok(lock_entry) => {
-            if let Some(cmd) = post_install {
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .status();
-                match status {
-                    Ok(s) if !s.success() => {
-                        if ui.quiet {
-                            eprintln!("warning: post_install failed for {name}: {cmd}");
-                        } else {
-                            let g = output::warn_glyph(ui.colored);
-                            mp.println(format!("  {g}  post_install failed for {name}: {cmd}"))
-                                .ok();
-                        }
-                    }
-                    Err(e) => {
-                        if ui.quiet {
-                            eprintln!("warning: post_install error for {name}: {e}");
-                        } else {
-                            let g = output::warn_glyph(ui.colored);
-                            mp.println(format!("  {g}  post_install error for {name}: {e}"))
-                                .ok();
-                        }
-                    }
-                    _ => {}
-                }
-            }
             if let Some(detected) = lock_entry.auto_binary.clone() {
                 outcome.binary_overrides.push((name.clone(), detected));
             }
@@ -545,7 +488,7 @@ fn handle_install_result(
     }
 }
 
-fn which_exists(cmd: &str) -> bool {
+pub(crate) fn which_exists(cmd: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|dir| dir.join(cmd).is_file()))
         .unwrap_or(false)
