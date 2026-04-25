@@ -1,10 +1,22 @@
 .PHONY: build test \
         test-integration-apt test-integration-dnf \
         test-integration-github test-integration-url test-integration-shell \
-        test-integration
+        test-integration \
+        release
 
 build:
 	cargo build --release
+
+# Usage: make release VERSION=0.2.0
+release:
+	@test -n "$(VERSION)" || (echo "error: VERSION is required  (e.g. make release VERSION=0.2.0)" && exit 1)
+	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || (echo "error: VERSION must be X.Y.Z" && exit 1)
+	sed -i 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
+	cargo build --release 2>/dev/null  # updates Cargo.lock
+	git add Cargo.toml Cargo.lock
+	git commit -m "chore: release v$(VERSION)"
+	git tag v$(VERSION)
+	git push origin master --tags
 
 # Run all unit tests (no Docker required).
 test:
