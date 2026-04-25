@@ -292,7 +292,11 @@ Add `grip audit` to CI to block deploys when new CVEs are published against your
 
 grip runs on Linux and macOS. Windows is not currently supported.
 
-Build from source with the Rust stable toolchain. Install Rust if you don't have it:
+```sh
+curl -fsSL https://github.com/omnone/grip/releases/latest/download/grip-$(uname -m)-linux -o ~/.local/bin/grip && chmod +x ~/.local/bin/grip
+```
+
+Or build from source with the Rust stable toolchain. Install Rust if you don't have it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
