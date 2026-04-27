@@ -63,7 +63,7 @@ pub enum BinaryEntry {
 }
 
 /// Entry installed via `dnf` (Fedora / RHEL).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct DnfEntry {
     pub package: String,
     /// On-PATH command name when it differs from the manifest key (e.g. package `ripgrep` → `rg`).
@@ -73,12 +73,21 @@ pub struct DnfEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_binaries: Option<Vec<String>>,
     pub version: Option<String>,
+    /// RPM repo package URLs to install before the main package (e.g. RPM Fusion).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnf_repos: Option<Vec<String>>,
+    /// GPG key URLs to import via `rpm --import` before installing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_keys: Option<Vec<String>>,
+    /// Extra flags appended to the `dnf install` command (e.g. `["--setopt=install_weak_deps=False"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnf_flags: Option<Vec<String>>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
 
 /// Entry installed via `apt-get` (Debian / Ubuntu).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct AptEntry {
     pub package: String,
     /// On-PATH command name when it differs from the manifest key (e.g. `fd-find` → `fd`).
@@ -88,6 +97,21 @@ pub struct AptEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_binaries: Option<Vec<String>>,
     pub version: Option<String>,
+    /// Additional apt source lines to add before installing (e.g. `["deb http://... trixie contrib"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_sources: Option<Vec<String>>,
+    /// debconf selection strings to feed to `debconf-set-selections` before installing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debconf_selections: Option<Vec<String>>,
+    /// GPG key URLs to download and dearmor into `/usr/share/keyrings/` before installing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_keys: Option<Vec<String>>,
+    /// Extra flags appended to the `apt-get install` command (e.g. `["--no-install-recommends"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_flags: Option<Vec<String>>,
+    /// Extra environment variables set when running `apt-get` (e.g. `{DEBIAN_FRONTEND = "noninteractive"}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_env: Option<IndexMap<String, String>>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -242,19 +266,35 @@ pub enum LibraryEntry {
 }
 
 /// Library entry installed via `apt-get` (Debian / Ubuntu).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LibAptEntry {
     pub package: String,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_sources: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debconf_selections: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_flags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apt_env: Option<IndexMap<String, String>>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
 
 /// Library entry installed via `dnf` (Fedora / RHEL).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LibDnfEntry {
     pub package: String,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnf_repos: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpg_keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnf_flags: Option<Vec<String>>,
     #[serde(flatten)]
     pub meta: CommonMeta,
 }
@@ -463,10 +503,8 @@ mod tests {
     fn pin_version_apt() {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
-            binary: None,
-            extra_binaries: None,
             version: None,
-            meta: CommonMeta::default(),
+            ..Default::default()
         });
         let pinned = entry.pin_version("1.6");
         if let BinaryEntry::Apt(a) = pinned {
@@ -480,10 +518,8 @@ mod tests {
     fn pin_version_dnf() {
         let entry = BinaryEntry::Dnf(DnfEntry {
             package: "jq".to_string(),
-            binary: None,
-            extra_binaries: None,
             version: None,
-            meta: CommonMeta::default(),
+            ..Default::default()
         });
         let pinned = entry.pin_version("1.6");
         if let BinaryEntry::Dnf(d) = pinned {
@@ -564,10 +600,8 @@ mod tests {
     fn apt_entry_pinned_when_version_set() {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
-            binary: None,
-            extra_binaries: None,
             version: Some("1.6".to_string()),
-            meta: CommonMeta::default(),
+            ..Default::default()
         });
         assert!(entry.is_version_pinned());
     }
@@ -576,10 +610,7 @@ mod tests {
     fn apt_entry_unpinned_when_no_version() {
         let entry = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
-            binary: None,
-            extra_binaries: None,
-            version: None,
-            meta: CommonMeta::default(),
+            ..Default::default()
         });
         assert!(!entry.is_version_pinned());
     }
@@ -619,10 +650,7 @@ mod tests {
 
         let apt = BinaryEntry::Apt(AptEntry {
             package: "jq".to_string(),
-            binary: None,
-            extra_binaries: None,
-            version: None,
-            meta: CommonMeta::default(),
+            ..Default::default()
         });
         assert_eq!(apt.source_label(), "apt");
     }
