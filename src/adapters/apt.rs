@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use indicatif::ProgressBar;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -403,6 +404,12 @@ fn add_apt_sources(
     sources: &[String],
     priv_mode: PrivilegeMode,
 ) -> Result<(), GripError> {
+    let existing_sources = existing_apt_source_lines();
+    let sources = filter_new_apt_sources(sources, &existing_sources);
+    if sources.is_empty() {
+        return Ok(());
+    }
+
     let safe_name: String = name
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -428,6 +435,57 @@ fn add_apt_sources(
         }
     }
     Ok(())
+}
+
+fn existing_apt_source_lines() -> HashSet<String> {
+    let mut lines = HashSet::new();
+    collect_apt_source_lines_from_file(Path::new("/etc/apt/sources.list"), &mut lines);
+
+    if let Ok(entries) = std::fs::read_dir("/etc/apt/sources.list.d") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("list") {
+                collect_apt_source_lines_from_file(&path, &mut lines);
+            }
+        }
+    }
+
+    lines
+}
+
+fn collect_apt_source_lines_from_file(path: &Path, out: &mut HashSet<String>) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in content.lines() {
+        if let Some(normalized) = normalize_apt_source_line(line) {
+            out.insert(normalized);
+        }
+    }
+}
+
+fn filter_new_apt_sources(sources: &[String], existing_sources: &HashSet<String>) -> Vec<String> {
+    let mut seen = existing_sources.clone();
+    let mut new_sources = Vec::new();
+
+    for source in sources {
+        let Some(normalized) = normalize_apt_source_line(source) else {
+            continue;
+        };
+        if seen.insert(normalized) {
+            new_sources.push(source.trim().to_string());
+        }
+    }
+
+    new_sources
+}
+
+fn normalize_apt_source_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Issue 2: Download a GPG key and dearmor it into /usr/share/keyrings/.
@@ -669,7 +727,8 @@ pub fn installed_version(package: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_apt_cache_policy_output;
+    use super::{filter_new_apt_sources, normalize_apt_source_line, parse_apt_cache_policy_output};
+    use std::collections::HashSet;
 
     const TYPICAL_OUTPUT: &str = "\
 ripgrep:
@@ -712,6 +771,25 @@ ripgrep:
         assert_eq!(
             parse_apt_cache_policy_output(output),
             Some("2.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn filters_apt_sources_already_present_in_existing_files() {
+        let existing = HashSet::from([normalize_apt_source_line(
+            "deb   http://deb.debian.org/debian   trixie   contrib non-free",
+        )
+        .unwrap()]);
+        let sources = vec![
+            "deb http://deb.debian.org/debian trixie contrib non-free".to_string(),
+            "deb http://deb.debian.org/debian trixie main".to_string(),
+            "deb http://deb.debian.org/debian trixie main".to_string(),
+            "  # ignored comment".to_string(),
+        ];
+
+        assert_eq!(
+            filter_new_apt_sources(&sources, &existing),
+            vec!["deb http://deb.debian.org/debian trixie main"]
         );
     }
 }

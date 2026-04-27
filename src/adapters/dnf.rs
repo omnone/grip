@@ -3,8 +3,10 @@
 use async_trait::async_trait;
 use indicatif::ProgressBar;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use crate::adapters::SourceAdapter;
 use crate::bin_dir::{sha256_of_installed, symlink_binary};
@@ -84,17 +86,7 @@ impl SourceAdapter for DnfAdapter {
 
             // Issue 1: install repo RPMs before the main package.
             if let Some(repos) = &d.dnf_repos {
-                for repo_url in repos {
-                    pb.set_message(format!("{name}  installing repo..."));
-                    let ok = dnf(priv_mode, &["install", "-y", repo_url], &[])
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    if !ok {
-                        return Err(GripError::CommandFailed(format!(
-                            "dnf install repo {repo_url}"
-                        )));
-                    }
-                }
+                install_dnf_repos(name, repos, priv_mode, &pb)?;
             }
 
             // Issue 2: import GPG keys before installing.
@@ -284,17 +276,7 @@ pub async fn install_dnf_library(
         let priv_mode = check_privileges()?;
 
         if let Some(repos) = &entry.dnf_repos {
-            for repo_url in repos {
-                pb.set_message(format!("{name}  installing repo..."));
-                let ok = dnf(priv_mode, &["install", "-y", repo_url], &[])
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !ok {
-                    return Err(GripError::CommandFailed(format!(
-                        "dnf install repo {repo_url}"
-                    )));
-                }
-            }
+            install_dnf_repos(name, repos, priv_mode, &pb)?;
         }
 
         if let Some(gpg_keys) = &entry.gpg_keys {
@@ -350,6 +332,70 @@ pub async fn install_dnf_library(
         auto_binary: None,
         auto_extra_binaries: vec![],
     })
+}
+
+fn install_dnf_repos(
+    name: &str,
+    repos: &[String],
+    priv_mode: PrivilegeMode,
+    pb: &ProgressBar,
+) -> Result<(), GripError> {
+    for repo_url in filter_new_dnf_repos(repos) {
+        pb.set_message(format!("{name}  installing repo..."));
+        let ok = dnf(priv_mode, &["install", "-y", &repo_url], &[])
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            forget_dnf_repo(&repo_url);
+            return Err(GripError::CommandFailed(format!(
+                "dnf install repo {repo_url}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn filter_new_dnf_repos(repos: &[String]) -> Vec<String> {
+    let mut new_repos = Vec::new();
+    let seen_lock = installed_dnf_repos().lock();
+    let Ok(mut seen) = seen_lock else {
+        return repos
+            .iter()
+            .filter_map(|repo| normalize_dnf_repo_url(repo))
+            .collect();
+    };
+
+    for repo in repos {
+        let Some(normalized) = normalize_dnf_repo_url(repo) else {
+            continue;
+        };
+        if seen.insert(normalized.clone()) {
+            new_repos.push(normalized);
+        }
+    }
+
+    new_repos
+}
+
+fn forget_dnf_repo(repo_url: &str) {
+    if let Ok(mut seen) = installed_dnf_repos().lock() {
+        if let Some(normalized) = normalize_dnf_repo_url(repo_url) {
+            seen.remove(&normalized);
+        }
+    }
+}
+
+fn installed_dnf_repos() -> &'static Mutex<HashSet<String>> {
+    static INSTALLED_DNF_REPOS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    INSTALLED_DNF_REPOS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn normalize_dnf_repo_url(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Issue 2: Import a GPG key via `rpm --import <url>`.
@@ -585,7 +631,7 @@ pub fn installed_version(package: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dnf_info_output;
+    use super::{filter_new_dnf_repos, installed_dnf_repos, parse_dnf_info_output};
 
     const TYPICAL_OUTPUT: &str = "\
 Last metadata expiration check: 0:01:23 ago on Mon Apr 13 10:00:00 2026.
@@ -639,5 +685,28 @@ Release      : 1.fc40";
             parse_dnf_info_output(output),
             Some("1.0.0-1.fc40".to_string())
         );
+    }
+
+    #[test]
+    fn filters_dnf_repo_urls_already_seen_in_this_process() {
+        installed_dnf_repos().lock().unwrap().clear();
+
+        let repos = vec![
+            " https://example.com/repo-release.rpm ".to_string(),
+            "https://example.com/repo-release.rpm".to_string(),
+            "".to_string(),
+            "https://example.com/other-release.rpm".to_string(),
+        ];
+
+        assert_eq!(
+            filter_new_dnf_repos(&repos),
+            vec![
+                "https://example.com/repo-release.rpm",
+                "https://example.com/other-release.rpm",
+            ]
+        );
+        assert!(filter_new_dnf_repos(&repos).is_empty());
+
+        installed_dnf_repos().lock().unwrap().clear();
     }
 }
