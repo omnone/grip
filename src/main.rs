@@ -101,6 +101,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
                 colored: color_err,
+                interactive: std::io::stderr().is_terminal(),
                 require_pins: false,
             };
             let start = std::time::Instant::now();
@@ -121,6 +122,7 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
                 colored: color_err,
+                interactive: std::io::stderr().is_terminal(),
                 require_pins,
             };
             let result = installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
@@ -2541,10 +2543,7 @@ extra_binaries = ["chromium-browser", "chromedriver"]
     #[test]
     fn detect_from_image_first_from_wins() {
         let content = "FROM ubuntu:22.04\nFROM alpine:3.18\n";
-        assert_eq!(
-            detect_from_image(content),
-            Some("ubuntu:22.04".to_string())
-        );
+        assert_eq!(detect_from_image(content), Some("ubuntu:22.04".to_string()));
     }
 
     // ── find_dockerfiles ──────────────────────────────────────────────────────
@@ -2569,7 +2568,11 @@ extra_binaries = ["chromium-browser", "chromedriver"]
     #[test]
     fn find_dockerfiles_detects_dockerfile_extension() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("service.dockerfile"), "FROM debian:bookworm\n").unwrap();
+        std::fs::write(
+            tmp.path().join("service.dockerfile"),
+            "FROM debian:bookworm\n",
+        )
+        .unwrap();
         let found = find_dockerfiles(tmp.path());
         assert_eq!(found.len(), 1);
     }
@@ -2599,6 +2602,7 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         let ui = installer::InstallOptions {
             quiet: true,
             colored: false,
+            interactive: false,
             require_pins: false,
         };
         let result = installer::run_install(false, false, None, Some(tmp.path().to_path_buf()), ui)

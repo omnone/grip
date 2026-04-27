@@ -822,7 +822,7 @@ fn extract_pkg_manager_install<'a>(line: &'a str, commands: &[&str]) -> Option<&
     };
     // Walk `&&`-separated sub-commands looking for the install command.
     for segment in after_run.split("&&") {
-        let seg = segment.trim();
+        let seg = strip_leading_shell_assignments(segment.trim());
         for cmd in commands {
             if seg.len() >= cmd.len() && seg[..cmd.len()].eq_ignore_ascii_case(cmd) {
                 return Some(&seg[cmd.len()..]);
@@ -830,6 +830,32 @@ fn extract_pkg_manager_install<'a>(line: &'a str, commands: &[&str]) -> Option<&
         }
     }
     None
+}
+
+fn strip_leading_shell_assignments(mut segment: &str) -> &str {
+    loop {
+        let trimmed = segment.trim_start();
+        let Some(word_end) = trimmed.find(char::is_whitespace) else {
+            return trimmed;
+        };
+        let word = &trimmed[..word_end];
+        if !is_shell_assignment(word) {
+            return trimmed;
+        }
+        segment = &trimmed[word_end..];
+    }
+}
+
+fn is_shell_assignment(word: &str) -> bool {
+    let Some((name, _value)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Parse a space-separated package list, stripping flags and version suffixes.
@@ -1970,6 +1996,24 @@ mod tests {
         assert!(
             names.contains(&"pkg-config"),
             "expected pkg-config in {names:?}"
+        );
+    }
+
+    #[test]
+    fn parse_apt_after_shell_assignment_in_chained_run() {
+        let content = "RUN set -e && \\\n    apt-get update && \\\n    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\\n    libxml2 \\\n    python3-psycopg2 \\\n    ffmpeg \\\n    less && \\\n    apt-get autoremove -y && \\\n    rm -rf /var/lib/apt/lists/*\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"libxml2"), "expected libxml2 in {names:?}");
+        assert!(
+            names.contains(&"python3-psycopg2"),
+            "expected python3-psycopg2 in {names:?}"
+        );
+        assert!(names.contains(&"ffmpeg"), "expected ffmpeg in {names:?}");
+        assert!(names.contains(&"less"), "expected less in {names:?}");
+        assert!(
+            !names.contains(&"autoremove"),
+            "must not include later apt-get command in {names:?}"
         );
     }
 

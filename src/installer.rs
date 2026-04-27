@@ -23,9 +23,16 @@ use crate::platform::Platform;
 pub struct InstallOptions {
     pub quiet: bool,
     pub colored: bool,
+    pub interactive: bool,
     /// Fail before installing if any entry has no version pin.
     /// Prevents silent auto-upgrades in CI.
     pub require_pins: bool,
+}
+
+impl InstallOptions {
+    fn plain_progress(&self) -> bool {
+        !self.quiet && !self.interactive
+    }
 }
 
 /// Summary of a completed install run.
@@ -226,7 +233,11 @@ pub async fn run_install(
 
     if total > 0 && !ui.quiet {
         let noun = if total == 1 { "binary" } else { "binaries" };
-        mp.println(format!("  Installing {total} {noun}...\n")).ok();
+        if ui.plain_progress() {
+            eprintln!("Installing {total} {noun}...");
+        } else {
+            mp.println(format!("  Installing {total} {noun}...\n")).ok();
+        }
     }
 
     let mut pb_map: HashMap<String, ProgressBar> = HashMap::new();
@@ -245,6 +256,9 @@ pub async fn run_install(
         pb.set_message(format!("{name}  resolving..."));
         pb.enable_steady_tick(Duration::from_millis(80));
         pb_map.insert(name.clone(), pb.clone());
+        if ui.plain_progress() {
+            eprintln!("[{}/{}] {name}: resolving...", idx + 1, total);
+        }
 
         // Issue 8: always use the locked version when one exists, so the lockfile
         // is enforceable and not merely advisory on fresh machines.
@@ -288,6 +302,9 @@ pub async fn run_install(
         pb.set_prefix(format!("[{}/{}]", pm_count + idx + 1, total));
         pb.set_message(format!("{name}  resolving..."));
         pb.enable_steady_tick(Duration::from_millis(80));
+        if ui.plain_progress() {
+            eprintln!("[{}/{}] {name}: resolving...", pm_count + idx + 1, total);
+        }
 
         pb_map.insert(name.clone(), pb.clone());
 
@@ -373,8 +390,12 @@ pub async fn run_install(
         } else {
             "libraries"
         };
-        mp.println(format!("  Installing {lib_total} {noun}...\n"))
-            .ok();
+        if ui.plain_progress() {
+            eprintln!("Installing {lib_total} {noun}...");
+        } else {
+            mp.println(format!("  Installing {lib_total} {noun}...\n"))
+                .ok();
+        }
     }
 
     // Libraries are installed sequentially to avoid package manager lock contention.
@@ -390,6 +411,9 @@ pub async fn run_install(
         pb.set_prefix(format!("[{}/{}]", idx + 1, lib_total));
         pb.set_message(format!("{name}  resolving..."));
         pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        if ui.plain_progress() {
+            eprintln!("[{}/{}] {name}: resolving...", idx + 1, lib_total);
+        }
 
         let result = match &entry {
             LibraryEntry::Apt(a) => {
@@ -523,8 +547,27 @@ mod tests {
         InstallOptions {
             quiet: true,
             colored: false,
+            interactive: false,
             require_pins,
         }
+    }
+
+    #[test]
+    fn plain_progress_is_enabled_only_for_non_interactive_non_quiet_runs() {
+        let mut opts = InstallOptions {
+            quiet: false,
+            colored: false,
+            interactive: false,
+            require_pins: false,
+        };
+        assert!(opts.plain_progress());
+
+        opts.interactive = true;
+        assert!(!opts.plain_progress());
+
+        opts.interactive = false;
+        opts.quiet = true;
+        assert!(!opts.plain_progress());
     }
 
     // ── require_pins guard ────────────────────────────────────────────────────
