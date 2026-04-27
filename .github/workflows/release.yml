@@ -1,16 +1,40 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Check version is new
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if release already exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if gh release view "$VERSION" &>/dev/null; then
+            echo "Release $VERSION already exists — bump the version in Cargo.toml first."
+            exit 1
+          fi
+          echo "Version $VERSION is new, proceeding."
+
   test:
     name: Test
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -84,7 +108,7 @@ jobs:
 
   release:
     name: Create release
-    needs: build
+    needs: [build, preflight]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -97,5 +121,6 @@ jobs:
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          tag_name: ${{ needs.preflight.outputs.version }}
           files: artifacts/*
           generate_release_notes: true
