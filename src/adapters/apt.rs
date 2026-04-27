@@ -119,9 +119,14 @@ impl SourceAdapter for AptAdapter {
                 .as_ref()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default();
-            let ok = apt_get(priv_mode, &["install", "-y", &pkg], &extra_flags, &extra_env)
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let ok = apt_get(
+                priv_mode,
+                &["install", "-y", &pkg],
+                &extra_flags,
+                &extra_env,
+            )
+            .map(|s| s.success())
+            .unwrap_or(false);
 
             if !ok {
                 return Err(GripError::CommandFailed(format!("apt-get install {pkg}")));
@@ -345,9 +350,14 @@ pub async fn install_apt_library(
             .as_ref()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        let ok = apt_get(priv_mode, &["install", "-y", &pkg], &extra_flags, &extra_env)
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let ok = apt_get(
+            priv_mode,
+            &["install", "-y", &pkg],
+            &extra_flags,
+            &extra_env,
+        )
+        .map(|s| s.success())
+        .unwrap_or(false);
 
         if !ok {
             return Err(GripError::CommandFailed(format!("apt-get install {pkg}")));
@@ -453,10 +463,7 @@ async fn import_apt_gpg_key(
     if let Some(mut stdin) = gpg_child.stdin.take() {
         stdin.write_all(&bytes).map_err(GripError::Io)?;
     }
-    let gpg_output = gpg_child
-        .wait_with_output()
-        .map_err(GripError::Io)?
-        .stdout;
+    let gpg_output = gpg_child.wait_with_output().map_err(GripError::Io)?.stdout;
 
     // Write the dearmored key to the keyring path using privilege.
     match priv_mode {

@@ -1,5 +1,7 @@
 # grip — CLI reference
 
+> For copy-pasteable recipes see [EXAMPLES.md](EXAMPLES.md).
+
 ## Global flags
 
 These work with every command:
@@ -17,7 +19,40 @@ These work with every command:
 
 ### `grip init`
 
-Creates `grip.toml` from a template and adds `.bin/` to `.gitignore`. No flags.
+Creates `grip.toml` and adds `.bin/` to `.gitignore`. When a Dockerfile is detected (or
+passed via `--from`), grip parses it for `RUN apt-get install` / `RUN dnf install` lines,
+classifies each package, verifies the results against a curated tool list and the host
+package manager, and offers to import the verified set into `grip.toml`.
+
+```sh
+grip init                          # auto-detect Dockerfile in cwd
+grip init --from path/Dockerfile   # explicit Dockerfile path (repeatable)
+grip init --yes                    # skip confirmation prompt
+grip init --no-import              # blank template only, no Dockerfile scanning
+grip init --offline                # skip GitHub repo-existence checks (Layer C)
+```
+
+#### Three-layer verification policy
+
+Before suggesting a package for import, `grip init` runs three verification layers:
+
+| Layer | What it does | Network? |
+|---|---|---|
+| A — curated list | Matches the package name against the built-in tool registry; confirms existence and fixes the on-PATH binary name (e.g. `ripgrep` → `rg`) | No |
+| B — host package manager | Runs `apt-cache show <pkg>` or `dnf info <pkg>` to confirm the package exists and determine its section (lib vs utils) | No |
+| C — GitHub repo existence | For tools identified in Layer A as having a GitHub source, sends a `HEAD` request to `api.github.com/repos/<owner>/<repo>` | Yes (opt-out with `--offline`) |
+
+Packages that pass neither Layer A nor Layer B are listed as **Skipped (not verified)** and
+are never written to `grip.toml`. Review them with `grip add <name>` if you need them.
+
+#### New flags
+
+| Flag | Description |
+|---|---|
+| `--from <PATH>`, `-f` | Explicit Dockerfile path to import from; may be repeated |
+| `--yes`, `-y` | Skip the confirmation prompt (also default for non-TTY) |
+| `--no-import` | Never scan Dockerfiles; produce a blank template only |
+| `--offline` | Disable Layer C (GitHub repo check); rely on curated list and host package manager only |
 
 ---
 

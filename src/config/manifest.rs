@@ -492,7 +492,10 @@ mod tests {
         // Reload and verify the pin survived.
         let m2 = Manifest::load(&path).unwrap();
         let entry2 = m2.binaries.get("jq").unwrap();
-        assert!(entry2.is_version_pinned(), "version pin must survive save→load");
+        assert!(
+            entry2.is_version_pinned(),
+            "version pin must survive save→load"
+        );
         if let BinaryEntry::Apt(a) = entry2 {
             assert_eq!(a.version.as_deref(), Some("1.6-2.1ubuntu3"));
         } else {

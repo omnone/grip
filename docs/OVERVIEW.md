@@ -47,12 +47,15 @@ binaries-manager/
 ├── grip.toml                      # Example manifest
 ├── grip.lock                      # Example lock file
 ├── README.md                      # User documentation
-├── OVERVIEW.md                    # This file — architecture reference
-├── COMMANDS.md                    # Full CLI and grip.toml reference
-├── SECURITY.md                    # Security guide: GPG, lock verify, CI setup
-├── CONTRIBUTING.md                # Contributor guide
 ├── LICENSE                        # MIT
-└── Makefile                       # Build + integration test targets
+├── AGENTS.md                      # Cursor / Claude Code agent rules
+├── Makefile                       # Build + integration test targets
+└── docs/
+    ├── OVERVIEW.md                # This file — architecture reference
+    ├── COMMANDS.md                # Full CLI and grip.toml reference
+    ├── SECURITY.md                # Security guide: GPG, lock verify, CI setup
+    ├── CONTRIBUTING.md            # Contributor guide
+    └── EXAMPLES.md                # Copy-pasteable recipes and walkthroughs
 ```
 
 ---
@@ -81,6 +84,7 @@ binaries-manager/
 | `output.rs` | ANSI colors, respects `NO_COLOR` and TTY detection |
 | `platform.rs` | Detects Linux/macOS/Windows and x86_64/aarch64 |
 | `privilege.rs` | Detects root or passwordless sudo via `id -u` / `sudo -n true` |
+| `suggest.rs` | `grip suggest` scanning; also exposes `parse_dockerfile_packages`, `classify`, and `verify_packages_sync` for `grip init` |
 
 ---
 

@@ -26,7 +26,6 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use clap::Parser;
 use cli::{CacheAction, Cli, Commands, LockAction};
-use sbom::SbomFormat;
 use config::lockfile::LockFile;
 use config::manifest::{
     find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry, LibDnfEntry,
@@ -35,6 +34,7 @@ use config::manifest::{
 use error::GripError;
 use indicatif::{ProgressBar, ProgressStyle};
 use output::OutputCfg;
+use sbom::SbomFormat;
 
 #[tokio::main]
 async fn main() {
@@ -57,7 +57,12 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
     let color_err = cfg.use_color_stderr();
 
     match cli.command {
-        Commands::Init => cmd_init(&cfg)?,
+        Commands::Init {
+            from,
+            yes,
+            no_import,
+            offline,
+        } => cmd_init(from, yes, no_import, offline, &cfg).await?,
         Commands::Add {
             name,
             source,
@@ -144,7 +149,13 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 "spdx" => SbomFormat::Spdx,
                 _ => SbomFormat::CycloneDx,
             };
-            sbom::run_sbom(root, sbom::SbomOptions { format: fmt, output })?;
+            sbom::run_sbom(
+                root,
+                sbom::SbomOptions {
+                    format: fmt,
+                    output,
+                },
+            )?;
         }
         Commands::Audit { no_fail } => {
             audit::run_audit(audit::AuditOptions {
@@ -277,7 +288,10 @@ fn cmd_check_print(
             if n_issues > 0 {
                 parts.push(output::yellow(
                     color_out,
-                    &format!("{n_issues} consistency issue{}", if n_issues == 1 { "" } else { "s" }),
+                    &format!(
+                        "{n_issues} consistency issue{}",
+                        if n_issues == 1 { "" } else { "s" }
+                    ),
                 ));
             }
             parts.join(", ")
@@ -292,10 +306,20 @@ fn cmd_check_print(
     Ok(())
 }
 
-/// Create a `grip.toml` template in the current directory and add `.bin/` to `.gitignore`.
-fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
+/// Create a `grip.toml` template in the current directory, add `.bin/` to `.gitignore`,
+/// and optionally import packages from a Dockerfile.
+async fn cmd_init(
+    from: Vec<std::path::PathBuf>,
+    yes: bool,
+    no_import: bool,
+    offline: bool,
+    cfg: &OutputCfg,
+) -> Result<(), GripError> {
+    use suggest::{parse_dockerfile_packages, verify_packages_sync, EntryKind, PkgManager};
+
     let path = std::path::Path::new("grip.toml");
     let color = cfg.use_color_stdout();
+
     if path.exists() {
         if !cfg.quiet {
             println!("grip.toml already exists");
@@ -310,31 +334,18 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
         return Ok(());
     }
 
-    let template = r#"# grip.toml — managed by grip
-# Add binary dependencies under [binaries.<name>] and system libraries under [libraries.<name>].
+    let template = "# grip.toml — managed by grip\n\
+        # Add binary dependencies under [binaries.<name>] and system libraries under [libraries.<name>].\n\
+        \n\
+        [binaries]\n\
+        \n\
+        [libraries]\n";
 
-[binaries]
-
-# Example:
-# [binaries.jq]
-# source = "github"
-# repo = "jqlang/jq"
-# version = "1.7.1"
-# asset_pattern = "jq-linux-amd64"
-
-[libraries]
-
-# Example:
-# [libraries.libssl-dev]
-# source = "apt"
-# package = "libssl-dev"
-"#;
     std::fs::write(path, template)?;
     if !cfg.quiet {
         println!("Created grip.toml");
     }
 
-    // Add .bin/ to .gitignore
     let gitignore = std::path::Path::new(".gitignore");
     let entry = ".bin/\n";
     if gitignore.exists() {
@@ -355,17 +366,336 @@ fn cmd_init(cfg: &OutputCfg) -> Result<(), GripError> {
         }
     }
 
+    if no_import {
+        if !cfg.quiet {
+            println!(
+                "hint: {}",
+                output::dim(
+                    color,
+                    "Run `grip add <name>` then `grip sync` to populate .bin/."
+                )
+            );
+        }
+        return Ok(());
+    }
+
+    let dockerfiles: Vec<std::path::PathBuf> = if !from.is_empty() {
+        from.into_iter().filter(|p| p.is_file()).collect()
+    } else {
+        find_dockerfiles(std::path::Path::new("."))
+    };
+
+    if dockerfiles.is_empty() {
+        if !cfg.quiet {
+            println!(
+                "hint: {}",
+                output::dim(
+                    color,
+                    "Run `grip add <name>` then `grip sync` to populate .bin/."
+                )
+            );
+        }
+        return Ok(());
+    }
+
+    let mut all_packages: Vec<suggest::DockerfilePackage> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut base_image: Option<String> = None;
+
+    for df_path in &dockerfiles {
+        if let Ok(content) = std::fs::read_to_string(df_path) {
+            if base_image.is_none() {
+                base_image = detect_from_image(&content);
+            }
+            for pkg in parse_dockerfile_packages(df_path) {
+                if seen_names.insert(pkg.name.clone()) {
+                    all_packages.push(pkg);
+                }
+            }
+        }
+    }
+
+    if all_packages.is_empty() {
+        if !cfg.quiet {
+            let label = dockerfiles_label(&dockerfiles);
+            println!(
+                "hint: {}",
+                output::dim(
+                    color,
+                    &format!("No apt/dnf install lines found in {label}.")
+                )
+            );
+        }
+        return Ok(());
+    }
+
+    let total_parsed = all_packages.len();
+    let label = dockerfiles_label(&dockerfiles);
     if !cfg.quiet {
         println!(
-            "hint: {}",
+            "\nFound {} — {} apt/dnf package{}.",
+            label,
+            total_parsed,
+            if total_parsed == 1 { "" } else { "s" }
+        );
+        println!(
+            "{}",
             output::dim(
                 color,
-                "Run `grip add <name>` then `grip sync` to populate .bin/."
+                "Verifying against curated tools and host package manager…"
             )
         );
     }
 
+    let (mut verified, unverified) = verify_packages_sync(all_packages);
+
+    if !offline {
+        let client = reqwest::Client::builder()
+            .user_agent("grip/0.1")
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(GripError::Http)?;
+
+        let mut futs: FuturesUnordered<_> = verified
+            .iter()
+            .enumerate()
+            .filter_map(|(i, pkg)| {
+                let repo = pkg.github_repo.clone()?;
+                let client = client.clone();
+                Some(async move {
+                    let url = format!("https://api.github.com/repos/{repo}");
+                    let ok = client
+                        .head(&url)
+                        .send()
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false);
+                    (i, ok)
+                })
+            })
+            .collect();
+
+        while let Some((idx, ok)) = futs.next().await {
+            if !ok {
+                verified[idx].github_repo = None;
+            }
+        }
+    }
+
+    if !cfg.quiet {
+        let n_verified = verified.len();
+        let n_unverified = unverified.len();
+
+        if n_verified > 0 {
+            println!(
+                "\n  {} — will import ({n_verified}):",
+                output::green(color, "Verified")
+            );
+            for pkg in &verified {
+                let kind_label = match pkg.kind {
+                    EntryKind::Binary => "binary ",
+                    EntryKind::Library => "library",
+                };
+                let ver_display = pkg
+                    .version
+                    .as_deref()
+                    .map(|v| format!("  {:<22}", v))
+                    .unwrap_or_else(|| "  ".repeat(12));
+                let cmd_note = pkg
+                    .binary_cmd
+                    .as_deref()
+                    .map(|c| format!("→ cmd `{c}`  "))
+                    .unwrap_or_default();
+                let via_note =
+                    output::dim(color, &format!("via {}  ({})", pkg.manager_str(), pkg.via));
+                println!(
+                    "    {kind_label}  {:<28} {ver_display}{cmd_note}{via_note}",
+                    pkg.name
+                );
+            }
+        }
+
+        if n_unverified > 0 {
+            println!(
+                "\n  {} — review manually ({n_unverified}):",
+                output::yellow(color, "Skipped (not verified)")
+            );
+            for name in &unverified {
+                let note = output::dim(color, "not found in curated list or host package manager");
+                println!("    {name:<30}  {note}");
+            }
+        }
+
+        if n_verified == 0 {
+            println!(
+                "\n  {}",
+                output::dim(color, "No packages could be verified — nothing to import.")
+            );
+            println!(
+                "hint: {}",
+                output::dim(color, "Run `grip add <name>` to add packages manually.")
+            );
+            return Ok(());
+        }
+    }
+
+    let do_import = if cfg.quiet || yes || !std::io::stdin().is_terminal() {
+        !verified.is_empty()
+    } else {
+        let n = verified.len();
+        eprint!(
+            "\n  Import the {} verified {} into grip.toml? [Y/n] ",
+            n,
+            if n == 1 { "entry" } else { "entries" }
+        );
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        let answer = line.trim().to_lowercase();
+        answer.is_empty() || answer == "y" || answer == "yes"
+    };
+
+    if !do_import {
+        if !cfg.quiet {
+            println!("  Skipped import. Run `grip add <name>` to add tools manually.");
+        }
+        return Ok(());
+    }
+
+    let mut manifest = Manifest::load(path)?;
+    for pkg in &verified {
+        let name = pkg.name.clone();
+        match pkg.kind {
+            EntryKind::Binary => {
+                let entry = match pkg.manager {
+                    PkgManager::Apt => BinaryEntry::Apt(AptEntry {
+                        package: name.clone(),
+                        binary: pkg.binary_cmd.clone(),
+                        version: pkg.version.clone(),
+                        ..Default::default()
+                    }),
+                    PkgManager::Dnf => BinaryEntry::Dnf(DnfEntry {
+                        package: name.clone(),
+                        binary: pkg.binary_cmd.clone(),
+                        version: pkg.version.clone(),
+                        ..Default::default()
+                    }),
+                };
+                manifest.binaries.insert(name, entry);
+            }
+            EntryKind::Library => {
+                let entry = match pkg.manager {
+                    PkgManager::Apt => LibraryEntry::Apt(LibAptEntry {
+                        package: name.clone(),
+                        version: pkg.version.clone(),
+                        ..Default::default()
+                    }),
+                    PkgManager::Dnf => LibraryEntry::Dnf(LibDnfEntry {
+                        package: name.clone(),
+                        version: pkg.version.clone(),
+                        ..Default::default()
+                    }),
+                };
+                manifest.libraries.insert(name, entry);
+            }
+        }
+    }
+    manifest.save(path)?;
+
+    if !cfg.quiet {
+        let n = verified.len();
+        let check = output::success_checkmark(color);
+        println!(
+            "\n  {check}  Imported {} verified {} into grip.toml.",
+            n,
+            if n == 1 { "entry" } else { "entries" }
+        );
+    }
+
+    if !cfg.quiet {
+        print_init_next_steps(base_image.as_deref(), color);
+    }
+
     Ok(())
+}
+
+/// Scan `root` for Dockerfile / Dockerfile.* / *.dockerfile files.
+fn find_dockerfiles(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_dockerfile = fname.eq_ignore_ascii_case("dockerfile")
+            || fname.to_ascii_lowercase().starts_with("dockerfile.")
+            || ext.eq_ignore_ascii_case("dockerfile");
+        if is_dockerfile {
+            out.push(p);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Parse the first `FROM` line in Dockerfile content and return the image reference.
+fn detect_from_image(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("from ") {
+            let rest = trimmed[5..].trim();
+            if rest.starts_with('$') || rest.starts_with("${") {
+                return None;
+            }
+            // Take only the image ref, not the AS alias.
+            let image = rest.split_whitespace().next()?;
+            return Some(image.to_string());
+        }
+    }
+    None
+}
+
+/// Produce a human-readable label for a list of Dockerfile paths.
+fn dockerfiles_label(paths: &[std::path::PathBuf]) -> String {
+    match paths {
+        [] => "no Dockerfiles".to_string(),
+        [p] => p.display().to_string(),
+        [p, q] => format!("{} and {}", p.display(), q.display()),
+        [p, rest @ ..] => format!("{} and {} more", p.display(), rest.len()),
+    }
+}
+
+/// Print the numbered next-step block shown after a successful import.
+fn print_init_next_steps(base_image: Option<&str>, color: bool) {
+    let image = base_image.unwrap_or("debian:bookworm");
+    println!("\n  Next steps:");
+    println!("    1. Review grip.toml — adjust binary/library classification if needed:");
+    println!("         grip list --all");
+    println!();
+    println!("    2. Generate grip.lock from inside the same base image:");
+    println!("         docker run --rm -v \"$PWD\":/work -w /work {image} \\");
+    println!("           sh -c 'apt-get update && apt-get install -y curl ca-certificates && \\");
+    println!(
+        "                  curl -fsSL https://github.com/omnone/grip/releases/latest/download/grip-x86_64-linux \\"
+    );
+    println!("                       -o /usr/local/bin/grip && chmod +x /usr/local/bin/grip && \\");
+    println!("                  grip sync --locked'");
+    println!();
+    println!("    3. Replace the apt-get install block in your Dockerfile:");
+    println!("         grip export --format dockerfile");
+    println!();
+    println!("    4. Commit:");
+    println!("         git add grip.toml grip.lock Dockerfile");
+    println!(
+        "\n  {}",
+        output::dim(color, "See docs/EXAMPLES.md for the full walkthrough.")
+    );
 }
 
 /// Split `name@version` into stem and optional version (last `@` wins).
@@ -404,23 +734,17 @@ fn cmd_add(
 ) -> Result<(), GripError> {
     let (stem, ver_from_at) = parse_name_at_version(name);
     let version = version.or(ver_from_at);
+    let mut source = source;
 
     let (binary_name, github_shorthand_repo) = if stem.contains('/') {
-        // owner/repo shorthand always implies GitHub — require the user to be explicit.
-        match source.as_deref() {
-            Some("github") => {}
-            Some(other) => {
-                return Err(GripError::Other(format!(
-                    "NAME '{stem}' looks like owner/repo but --source is '{other}'; \
-                     use a simple binary name for non-GitHub sources"
-                )));
-            }
-            None => {
-                return Err(GripError::Other(format!(
-                    "NAME '{stem}' looks like owner/repo; pass --source github explicitly \
-                     (e.g. `grip add {stem} --source github`)"
-                )));
-            }
+        if let Some(other) = source.as_deref().filter(|&s| s != "github") {
+            return Err(GripError::Other(format!(
+                "NAME '{stem}' looks like owner/repo but --source is '{other}'; \
+                 use a simple binary name for non-GitHub sources"
+            )));
+        }
+        if source.is_none() {
+            source = Some("github".to_string());
         }
         let repo_full = stem.clone();
         let bn = stem
@@ -1067,7 +1391,10 @@ async fn cmd_outdated(
         let norm = |s: &str| s.trim_start_matches('v').to_lowercase();
         for (name, _) in &entries {
             let installed = lock.get(name).map(|e| e.version.as_str()).unwrap_or("-");
-            let latest = latest_map.get(name).and_then(|o| o.as_deref()).unwrap_or("-");
+            let latest = latest_map
+                .get(name)
+                .and_then(|o| o.as_deref())
+                .unwrap_or("-");
             let status = if latest == "-" {
                 "unknown"
             } else if installed == "-" {
@@ -1088,7 +1415,10 @@ async fn cmd_outdated(
             .collect();
 
         for (name, entry) in &lib_entries {
-            let locked = lock.get_library(name).map(|e| e.version.as_str()).unwrap_or("-");
+            let locked = lock
+                .get_library(name)
+                .map(|e| e.version.as_str())
+                .unwrap_or("-");
             let system_ver: Option<String> = match entry {
                 config::manifest::LibraryEntry::Apt(a) => {
                     crate::adapters::apt::installed_version(&a.package)
@@ -1598,7 +1928,10 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
                         .map(|v| v == &lock_entry.version)
                         .unwrap_or(false);
                     if already {
-                        eprintln!("  {check}  {name}  {} (already at latest)", lock_entry.version);
+                        eprintln!(
+                            "  {check}  {name}  {} (already at latest)",
+                            lock_entry.version
+                        );
                     } else {
                         eprintln!("  {check}  {name}  {}", lock_entry.version);
                     }
@@ -1902,7 +2235,9 @@ fn cmd_export(
             if !apt_pkgs.is_empty() {
                 let pkgs = apt_pkgs.join(" \\\n  ");
                 println!("apt-get update");
-                println!("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\");
+                println!(
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\"
+                );
                 println!("  {pkgs}");
             }
             if !dnf_pkgs.is_empty() {
@@ -1936,16 +2271,12 @@ fn print_install_result(
     }
     for (name, detected) in &result.binary_overrides {
         let check = output::success_checkmark(color_err);
-        eprintln!(
-            "  {check}  {name}: auto-detected binary `{detected}`; updated grip.toml"
-        );
+        eprintln!("  {check}  {name}: auto-detected binary `{detected}`; updated grip.toml");
     }
     for (name, extras) in &result.extra_binary_overrides {
         let check = output::success_checkmark(color_err);
         let list = extras.join(", ");
-        eprintln!(
-            "  {check}  {name}: auto-detected extra binaries [{list}]; updated grip.toml"
-        );
+        eprintln!("  {check}  {name}: auto-detected extra binaries [{list}]; updated grip.toml");
     }
     for (name, err) in &result.warned {
         let g = output::warn_glyph(color_err);
@@ -1964,7 +2295,10 @@ fn print_install_result(
     } else {
         let mut parts: Vec<String> = Vec::new();
         if n_installed > 0 {
-            parts.push(output::green(color_out, &format!("{n_installed} installed")));
+            parts.push(output::green(
+                color_out,
+                &format!("{n_installed} installed"),
+            ));
         }
         if n_skipped > 0 {
             parts.push(output::dim(color_out, &format!("{n_skipped} skipped")));
@@ -2107,5 +2441,170 @@ extra_binaries = ["chromium-browser", "chromedriver"]
     #[test]
     fn format_bytes_mib() {
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    // ── cmd_add owner/repo shorthand ─────────────────────────────────────────
+
+    #[test]
+    fn add_owner_repo_shorthand_writes_github_entry() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "[binaries]\n[libraries]\n").unwrap();
+
+        cmd_add(
+            "BurntSushi/ripgrep".into(),
+            None,  // source: None — must be inferred as github
+            None,  // version
+            None,  // repo
+            None,  // url
+            None,  // package
+            None,  // binary
+            false, // library
+            None,  // gpg_fingerprint
+            None,  // sig_asset_pattern
+            None,  // checksums_asset_pattern
+            None,  // sig_url
+            None,  // signed_checksums_url
+            None,  // checksums_sig_url
+            Some(tmp.path().to_path_buf()),
+            &silent_cfg(),
+        )
+        .expect("owner/repo shorthand should succeed without --source github");
+
+        let manifest = config::manifest::Manifest::load(&tmp.path().join("grip.toml")).unwrap();
+        let entry = manifest
+            .binaries
+            .get("ripgrep")
+            .expect("entry must be named after the repo segment");
+        match entry {
+            config::manifest::BinaryEntry::Github(g) => {
+                assert_eq!(g.repo, "BurntSushi/ripgrep");
+            }
+            other => panic!("expected Github entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_owner_repo_explicit_wrong_source_errors() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "[binaries]\n[libraries]\n").unwrap();
+        let err = cmd_add(
+            "BurntSushi/ripgrep".into(),
+            Some("apt".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(tmp.path().to_path_buf()),
+            &silent_cfg(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--source is 'apt'"));
+    }
+
+    // ── detect_from_image ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_from_image_plain() {
+        assert_eq!(
+            detect_from_image("FROM debian:bookworm\nRUN echo hi\n"),
+            Some("debian:bookworm".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_from_image_strips_as_alias() {
+        assert_eq!(
+            detect_from_image("FROM python:3.12-slim AS builder\n"),
+            Some("python:3.12-slim".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_from_image_variable_returns_none() {
+        assert!(detect_from_image("FROM $BASE_IMAGE\n").is_none());
+        assert!(detect_from_image("FROM ${BASE_IMAGE}\n").is_none());
+    }
+
+    #[test]
+    fn detect_from_image_no_from_returns_none() {
+        assert!(detect_from_image("RUN apt-get install -y jq\n").is_none());
+    }
+
+    #[test]
+    fn detect_from_image_first_from_wins() {
+        let content = "FROM ubuntu:22.04\nFROM alpine:3.18\n";
+        assert_eq!(
+            detect_from_image(content),
+            Some("ubuntu:22.04".to_string())
+        );
+    }
+
+    // ── find_dockerfiles ──────────────────────────────────────────────────────
+
+    #[test]
+    fn find_dockerfiles_detects_standard_name() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Dockerfile"), "FROM debian:bookworm\n").unwrap();
+        let found = find_dockerfiles(tmp.path());
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("Dockerfile"));
+    }
+
+    #[test]
+    fn find_dockerfiles_detects_dot_suffixed() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Dockerfile.dev"), "FROM debian:bookworm\n").unwrap();
+        let found = find_dockerfiles(tmp.path());
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn find_dockerfiles_detects_dockerfile_extension() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("service.dockerfile"), "FROM debian:bookworm\n").unwrap();
+        let found = find_dockerfiles(tmp.path());
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn find_dockerfiles_ignores_non_dockerfiles() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("docker-compose.yml"), "version: '3'\n").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "# project\n").unwrap();
+        let found = find_dockerfiles(tmp.path());
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn find_dockerfiles_empty_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        assert!(find_dockerfiles(tmp.path()).is_empty());
+    }
+
+    // ── sync empty-manifest hint ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_empty_manifest_returns_empty_result() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("grip.toml"), "[binaries]\n[libraries]\n").unwrap();
+
+        let ui = installer::InstallOptions {
+            quiet: true,
+            colored: false,
+            require_pins: false,
+        };
+        let result = installer::run_install(false, false, None, Some(tmp.path().to_path_buf()), ui)
+            .await
+            .unwrap();
+        assert!(result.installed.is_empty());
+        assert!(result.failed.is_empty());
     }
 }

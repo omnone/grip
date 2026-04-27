@@ -85,12 +85,10 @@ fn build_cyclonedx(entries: &[&LockEntry]) -> Value {
                 "purl": purl::purl_for_entry(e),
             });
             if let Some(sha) = &e.sha256 {
-                component["hashes"] =
-                    json!([{ "alg": "SHA-256", "content": sha }]);
+                component["hashes"] = json!([{ "alg": "SHA-256", "content": sha }]);
             }
             if let Some(url) = &e.url {
-                component["externalReferences"] =
-                    json!([{ "type": "distribution", "url": url }]);
+                component["externalReferences"] = json!([{ "type": "distribution", "url": url }]);
             }
             component
         })
@@ -172,7 +170,13 @@ fn build_spdx(entries: &[&LockEntry]) -> Value {
 fn spdx_ref(name: &str, version: &str) -> String {
     let sanitize = |s: &str| -> String {
         s.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect()
     };
     format!("SPDXRef-{}-{}", sanitize(name), sanitize(version))
@@ -208,7 +212,13 @@ mod tests {
     use crate::config::lockfile::LockEntry;
     use chrono::Utc;
 
-    fn entry(name: &str, version: &str, source: &str, url: Option<&str>, sha256: Option<&str>) -> LockEntry {
+    fn entry(
+        name: &str,
+        version: &str,
+        source: &str,
+        url: Option<&str>,
+        sha256: Option<&str>,
+    ) -> LockEntry {
         LockEntry {
             name: name.to_string(),
             version: version.to_string(),
@@ -226,21 +236,32 @@ mod tests {
 
     #[test]
     fn cyclonedx_has_required_top_level_fields() {
-        let e = entry("jq", "1.7.1", "github",
+        let e = entry(
+            "jq",
+            "1.7.1",
+            "github",
             Some("https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux"),
-            Some("abc123"));
+            Some("abc123"),
+        );
         let doc = build_cyclonedx(&[&e]);
         assert_eq!(doc["bomFormat"], "CycloneDX");
         assert_eq!(doc["specVersion"], "1.5");
-        assert!(doc["serialNumber"].as_str().unwrap().starts_with("urn:uuid:"));
+        assert!(doc["serialNumber"]
+            .as_str()
+            .unwrap()
+            .starts_with("urn:uuid:"));
         assert_eq!(doc["version"], 1);
     }
 
     #[test]
     fn cyclonedx_component_has_purl_and_hash() {
-        let e = entry("jq", "1.7.1", "github",
+        let e = entry(
+            "jq",
+            "1.7.1",
+            "github",
             Some("https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux"),
-            Some("deadbeef"));
+            Some("deadbeef"),
+        );
         let doc = build_cyclonedx(&[&e]);
         let comp = &doc["components"][0];
         assert_eq!(comp["name"], "jq");
@@ -275,20 +296,31 @@ mod tests {
 
     #[test]
     fn spdx_has_required_top_level_fields() {
-        let e = entry("jq", "1.7.1", "github",
+        let e = entry(
+            "jq",
+            "1.7.1",
+            "github",
             Some("https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux"),
-            None);
+            None,
+        );
         let doc = build_spdx(&[&e]);
         assert_eq!(doc["spdxVersion"], "SPDX-2.3");
         assert_eq!(doc["dataLicense"], "CC0-1.0");
-        assert!(doc["documentNamespace"].as_str().unwrap().starts_with("https://grip.dev/sbom/"));
+        assert!(doc["documentNamespace"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://grip.dev/sbom/"));
     }
 
     #[test]
     fn spdx_package_has_purl_external_ref() {
-        let e = entry("jq", "1.7.1", "github",
+        let e = entry(
+            "jq",
+            "1.7.1",
+            "github",
             Some("https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux"),
-            None);
+            None,
+        );
         let doc = build_spdx(&[&e]);
         let pkg = &doc["packages"][0];
         assert_eq!(pkg["name"], "jq");
@@ -296,7 +328,10 @@ mod tests {
         let ext_ref = &pkg["externalRefs"][0];
         assert_eq!(ext_ref["referenceCategory"], "PACKAGE-MANAGER");
         assert_eq!(ext_ref["referenceType"], "purl");
-        assert!(ext_ref["referenceLocator"].as_str().unwrap().contains("jqlang/jq"));
+        assert!(ext_ref["referenceLocator"]
+            .as_str()
+            .unwrap()
+            .contains("jqlang/jq"));
     }
 
     #[test]

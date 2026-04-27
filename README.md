@@ -114,6 +114,57 @@ $ grip sync --locked
 
 ---
 
+## Integrating grip into a Dockerfile project
+
+If your project already has a `Dockerfile` with `RUN apt-get install` or `RUN dnf install` lines,
+`grip init` can import those packages automatically:
+
+```sh
+# 1. Run grip init in the project root — auto-detects Dockerfile
+$ grip init
+
+Created grip.toml
+Added .bin/ to .gitignore
+
+Found Dockerfile — 14 apt packages.
+Verifying against curated tools and host package manager…
+
+  Verified — will import (11):
+    binary   jq            1.6-2.1          via apt  (curated)
+    binary   ripgrep                        via apt  (curated)  → cmd `rg`
+    library  libssl-dev    1.1.1n-0+deb11u5 via apt
+    library  pkg-config                     via apt  (curated)
+    library  build-essential                via apt  (curated)
+    ...
+
+  Skipped (not verified) — review manually (3):
+    some-internal-tool   not found in curated list or host package manager
+
+  Import the 11 verified entries into grip.toml? [Y/n]
+```
+
+```sh
+# 2. Generate grip.lock from inside the same Docker base image
+$ docker run --rm -v "$PWD":/work -w /work debian:bookworm \
+    sh -c 'apt-get update && apt-get install -y curl ca-certificates && \
+           curl -fsSL https://github.com/omnone/grip/releases/latest/download/grip-x86_64-linux \
+                -o /usr/local/bin/grip && chmod +x /usr/local/bin/grip && \
+           grip sync --locked'
+
+# 3. Replace the apt-get install block in your Dockerfile
+$ grip export --format dockerfile
+
+# 4. Commit
+$ git add grip.toml grip.lock Dockerfile
+```
+
+After this, every developer and CI run gets the same packages via `grip sync`.
+
+See [EXAMPLES.md](docs/EXAMPLES.md) for the full walkthrough including multi-Dockerfile projects,
+`--offline` mode, and the CI setup.
+
+---
+
 ## Day-to-day workflow
 
 ### Run a tool without changing your shell PATH
@@ -255,7 +306,7 @@ For generating lock-accurate Dockerfile instructions, see [Quickstart](#quicksta
 - **Mixed sources** — four source types are currently supported: `github`, `url`, `apt`, and `dnf`, all declared in a single `grip.toml`.
 - **Fast installs** — a local download cache avoids re-fetching; multiple tools install concurrently.
 - **Semver ranges** — `version = "^1.30"` resolves to the highest matching release and locks the result.
-- **Supply chain protection** — optional GPG verification, tamper detection, and floating-version enforcement. See [SECURITY.md](SECURITY.md).
+- **Supply chain protection** — optional GPG verification, tamper detection, and floating-version enforcement. See [SECURITY.md](docs/SECURITY.md).
 
 ### SBOM generation
 
@@ -334,19 +385,25 @@ grip supports layered supply chain protections:
 - **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".
 - **Health checks** — `grip check` detects orphaned lock entries, missing SHA-256 hashes, and unpinned entries in addition to verifying installed binaries.
 
-See [SECURITY.md](SECURITY.md) for the full guide.
+See [SECURITY.md](docs/SECURITY.md) for the full guide.
 
 ---
 
 ## CLI reference
 
-For the full command reference — all flags, source types, shell integration, and CI guidance — see [COMMANDS.md](COMMANDS.md).
+For the full command reference — all flags, source types, shell integration, and CI guidance — see [COMMANDS.md](docs/COMMANDS.md).
+
+---
+
+## Recipes
+
+For copy-pasteable examples covering Dockerfile import, GitHub releases, apt/dnf, pinning, and CI setup see [EXAMPLES.md](docs/EXAMPLES.md).
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run the test suites, and add new adapters.
+See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for how to build, run the test suites, and add new adapters.
 
 ---
 

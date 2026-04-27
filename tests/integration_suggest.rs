@@ -41,7 +41,12 @@ fn exit_code(out: &Output) -> i32 {
 fn suggest_exits_zero_when_nothing_to_scan() {
     let dir = TempDir::new().expect("TempDir");
     let out = suggest(dir.path(), &[]);
-    assert_eq!(exit_code(&out), 0, "expected exit 0, got:\n{}", stderr(&out));
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "expected exit 0, got:\n{}",
+        stderr(&out)
+    );
 }
 
 /// `--check` on a clean project (no suggestions) still exits 0.
@@ -83,10 +88,7 @@ fn suggest_check_exits_one_when_findings_exist() {
     std::fs::write(&src, "import subprocess\nsubprocess.run([\"jq\", \".\"])\n")
         .expect("write script.py");
 
-    let out = suggest(
-        dir.path(),
-        &["--check", "--path", src.to_str().unwrap()],
-    );
+    let out = suggest(dir.path(), &["--check", "--path", src.to_str().unwrap()]);
     assert_eq!(
         exit_code(&out),
         1,
@@ -110,10 +112,7 @@ fn suggest_check_exits_zero_when_tool_already_declared() {
     std::fs::write(&src, "import subprocess\nsubprocess.run([\"jq\", \".\"])\n")
         .expect("write script.py");
 
-    let out = suggest(
-        dir.path(),
-        &["--check", "--path", src.to_str().unwrap()],
-    );
+    let out = suggest(dir.path(), &["--check", "--path", src.to_str().unwrap()]);
     assert_eq!(
         exit_code(&out),
         0,
@@ -128,13 +127,13 @@ fn suggest_check_detects_bin_path_literals() {
     let dir = TempDir::new().expect("TempDir");
     let src = dir.path().join("deploy.py");
     // Uses a /usr/bin/ path literal — caught by scan_binary_paths, not a language pattern.
-    std::fs::write(&src, "os.execv(\"/usr/bin/jq\", [\"/usr/bin/jq\", \".\"])\n")
-        .expect("write deploy.py");
+    std::fs::write(
+        &src,
+        "os.execv(\"/usr/bin/jq\", [\"/usr/bin/jq\", \".\"])\n",
+    )
+    .expect("write deploy.py");
 
-    let out = suggest(
-        dir.path(),
-        &["--check", "--path", src.to_str().unwrap()],
-    );
+    let out = suggest(dir.path(), &["--check", "--path", src.to_str().unwrap()]);
     assert_eq!(
         exit_code(&out),
         1,
@@ -154,10 +153,7 @@ fn suggest_check_detects_go_exec_command() {
     )
     .expect("write main.go");
 
-    let out = suggest(
-        dir.path(),
-        &["--check", "--path", src.to_str().unwrap()],
-    );
+    let out = suggest(dir.path(), &["--check", "--path", src.to_str().unwrap()]);
     assert_eq!(
         exit_code(&out),
         1,

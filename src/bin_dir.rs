@@ -62,8 +62,7 @@ pub fn link_to_user_path(bin_dir: &Path, name: &str) -> Result<(), GripError> {
         };
         let local_bin = std::path::Path::new(&home).join(".local/bin");
         fs::create_dir_all(&local_bin)?;
-        let target = fs::canonicalize(bin_dir.join(name))
-            .unwrap_or_else(|_| bin_dir.join(name));
+        let target = fs::canonicalize(bin_dir.join(name)).unwrap_or_else(|_| bin_dir.join(name));
         let link = local_bin.join(name);
         if link.exists() || link.is_symlink() {
             fs::remove_file(&link)?;

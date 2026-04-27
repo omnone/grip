@@ -21,7 +21,7 @@
 
 ## Documentation
 
-- After every change, check whether any of the doc files (`README.md`, `COMMANDS.md`, `OVERVIEW.md`, `CONTRIBUTING.md`) need updating to reflect the change.
+- After every change, check whether any of the doc files (`README.md`, `docs/COMMANDS.md`, `docs/OVERVIEW.md`, `docs/CONTRIBUTING.md`) need updating to reflect the change.
 - If a command, flag, or behavior is added, removed, or renamed, update the relevant doc files before finishing.
 
 ## Commits

@@ -76,6 +76,41 @@ pub async fn run_install(
     let mut lock = LockFile::load(&lock_path)?;
     let platform = Platform::current();
 
+    if manifest.binaries.is_empty() && manifest.libraries.is_empty() {
+        if !ui.quiet {
+            let has_dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
+                .iter()
+                .any(|n| project_root.join(n).exists())
+                || std::fs::read_dir(&project_root)
+                    .ok()
+                    .map(|entries| {
+                        entries.flatten().any(|e| {
+                            let fname = e.file_name();
+                            let name = fname.to_string_lossy().to_ascii_lowercase();
+                            name.starts_with("dockerfile") || name.ends_with(".dockerfile")
+                        })
+                    })
+                    .unwrap_or(false);
+            if has_dockerfile {
+                eprintln!(
+                    "hint: grip.toml is empty — run `grip init` to import packages from your Dockerfile."
+                );
+            } else {
+                eprintln!(
+                    "hint: grip.toml is empty — try `grip suggest --path src/` to discover candidates."
+                );
+            }
+        }
+        return Ok(InstallResult {
+            installed: vec![],
+            skipped: vec![],
+            failed: vec![],
+            warned: vec![],
+            binary_overrides: vec![],
+            extra_binary_overrides: vec![],
+        });
+    }
+
     // --require-pins: fail before touching the network if any entry floats.
     if ui.require_pins {
         let unpinned: Vec<String> = manifest
@@ -234,13 +269,7 @@ pub async fn run_install(
                 .await
         };
 
-        handle_install_result(
-            name,
-            res,
-            &required_flags,
-            &mut lock,
-            &mut outcome,
-        );
+        handle_install_result(name, res, &required_flags, &mut lock, &mut outcome);
     }
 
     // ── Concurrent pass: download-based binaries ────────────────────────────
@@ -296,13 +325,7 @@ pub async fn run_install(
     }
 
     while let Some((name, res)) = futures.next().await {
-        handle_install_result(
-            name,
-            res,
-            &required_flags,
-            &mut lock,
-            &mut outcome,
-        );
+        handle_install_result(name, res, &required_flags, &mut lock, &mut outcome);
     }
 
     // ── Library install pass ────────────────────────────────────────────────
@@ -375,7 +398,8 @@ pub async fn run_install(
                         adapter: "apt".to_string(),
                     })
                 } else {
-                    apt_adapter::install_apt_library(&name, a, &client, pb.clone(), ui.colored).await
+                    apt_adapter::install_apt_library(&name, a, &client, pb.clone(), ui.colored)
+                        .await
                 }
             }
             LibraryEntry::Dnf(d) => {
@@ -384,7 +408,8 @@ pub async fn run_install(
                         adapter: "dnf".to_string(),
                     })
                 } else {
-                    dnf_adapter::install_dnf_library(&name, d, &client, pb.clone(), ui.colored).await
+                    dnf_adapter::install_dnf_library(&name, d, &client, pb.clone(), ui.colored)
+                        .await
                 }
             }
         };

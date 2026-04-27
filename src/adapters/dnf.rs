@@ -164,25 +164,23 @@ impl SourceAdapter for DnfAdapter {
             // auto-detection instead of failing immediately.
             let candidates = detect_package_executables(&d.package);
             match candidates.as_slice() {
-                [single] => {
-                    match find_in_path(single) {
-                        Some(p) => {
-                            eprintln!(
+                [single] => match find_in_path(single) {
+                    Some(p) => {
+                        eprintln!(
                                 "warn: binary `{cmd_name}` not found after installing `{}`; \
                                  auto-detected `{single}` — update grip.toml: binary = \"{single}\"",
                                 d.package
                             );
-                            (p, Some(single.clone()))
-                        }
-                        None => {
-                            return Err(GripError::CommandFailed(format!(
+                        (p, Some(single.clone()))
+                    }
+                    None => {
+                        return Err(GripError::CommandFailed(format!(
                                 "installed package `{}` but `{cmd_name}` is not on PATH; \
                                  set `binary = \"...\"` in grip.toml if the executable uses another name",
                                 d.package
                             )));
-                        }
                     }
-                }
+                },
                 [] => {
                     return Err(GripError::CommandFailed(format!(
                         "installed package `{}` but `{cmd_name}` is not on PATH; \

@@ -56,7 +56,26 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Create grip.toml (and .gitignore entry for .bin/) in the current directory
-    Init,
+    ///
+    /// When a Dockerfile is detected (or passed via --from), grip parses it for
+    /// `RUN apt-get install` / `RUN dnf install` lines, classifies each package as
+    /// a binary tool or a library, verifies the findings against a curated list and
+    /// the host package manager, and offers to import the verified set into grip.toml.
+    Init {
+        /// Explicit Dockerfile path(s) to import from; may be repeated.
+        /// When omitted, grip auto-detects Dockerfile / Dockerfile.* / *.dockerfile in cwd.
+        #[arg(long = "from", short = 'f', value_name = "PATH")]
+        from: Vec<std::path::PathBuf>,
+        /// Accept all verified entries without prompting (also the default for non-TTY)
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Skip Dockerfile scanning; create a blank grip.toml template only
+        #[arg(long)]
+        no_import: bool,
+        /// Skip GitHub repo-existence checks; rely only on the curated list and host package manager
+        #[arg(long)]
+        offline: bool,
+    },
     /// Add a binary or library entry to grip.toml
     ///
     /// For GitHub, you can pass `owner/repo` as NAME (binary name becomes the last segment),

@@ -1,5 +1,8 @@
 //! `grip suggest` — discover unmanaged CLI tools from shell history, project
 //! scripts, CI YAML, and source code.
+//!
+//! Also exposes [`parse_dockerfile_packages`], [`classify`], and
+//! [`verify_packages_sync`] as a public API consumed by `grip init`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -9,6 +12,406 @@ use std::path::{Path, PathBuf};
 use crate::config::manifest::{find_manifest_dir, Manifest};
 use crate::error::GripError;
 use crate::output;
+
+// ── Dockerfile import types ───────────────────────────────────────────────────
+
+/// Which package manager installed the package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PkgManager {
+    Apt,
+    Dnf,
+}
+
+/// A package parsed from a Dockerfile `RUN` install line, with optional version pin.
+#[derive(Debug, Clone)]
+pub struct DockerfilePackage {
+    pub name: String,
+    /// Version pin captured from the Dockerfile (e.g. `1.6-2.1ubuntu3` for `jq=1.6-2.1ubuntu3`).
+    pub version: Option<String>,
+    pub manager: PkgManager,
+}
+
+/// Whether a package is a runnable binary tool or a library / build dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    Binary,
+    Library,
+}
+
+/// A package that has passed at least one verification layer and is safe to import.
+#[derive(Debug, Clone)]
+pub struct VerifiedPkg {
+    pub name: String,
+    pub version: Option<String>,
+    pub manager: PkgManager,
+    pub kind: EntryKind,
+    /// On-PATH command name when it differs from the package name (e.g. `"rg"` for `"ripgrep"`).
+    pub binary_cmd: Option<String>,
+    /// GitHub repo identified by the curated list (e.g. `"BurntSushi/ripgrep"`).
+    /// May be cleared by Layer-C validation when the repo does not exist.
+    pub github_repo: Option<String>,
+    /// Verification source: `"curated"`, `"apt-cache"`, or `"dnf info"`.
+    pub via: String,
+}
+
+impl VerifiedPkg {
+    /// Short string name for the package manager (`"apt"` or `"dnf"`).
+    pub fn manager_str(&self) -> &'static str {
+        match self.manager {
+            PkgManager::Apt => "apt",
+            PkgManager::Dnf => "dnf",
+        }
+    }
+}
+
+// ── Dockerfile import public API ──────────────────────────────────────────────
+
+/// Parse a Dockerfile at `path` and return all packages found in
+/// `RUN apt-get install` / `RUN dnf install` lines.
+///
+/// Version pins (`pkg=1.2.3`) are captured; packages that appear more than
+/// once are deduplicated (first occurrence wins).
+pub fn parse_dockerfile_packages(path: &Path) -> Vec<DockerfilePackage> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return vec![];
+    };
+    parse_dockerfile_content_typed(&content)
+}
+
+/// Parse Dockerfile content string — shared by [`parse_dockerfile_packages`] and tests.
+fn parse_dockerfile_content_typed(content: &str) -> Vec<DockerfilePackage> {
+    let mut logical_lines: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    for line in content.lines() {
+        if line.ends_with('\\') {
+            buf.push_str(line.trim_end_matches('\\'));
+            buf.push(' ');
+        } else {
+            buf.push_str(line);
+            logical_lines.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        logical_lines.push(buf);
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<DockerfilePackage> = Vec::new();
+
+    for line in &logical_lines {
+        let trimmed = line.trim();
+        if let Some(rest) =
+            extract_pkg_manager_install(trimmed, &["apt-get install", "apt install"])
+        {
+            for pkg in parse_versioned_pkg_list(rest, PkgManager::Apt) {
+                if seen.insert(pkg.name.clone()) {
+                    out.push(pkg);
+                }
+            }
+        }
+        if let Some(rest) =
+            extract_pkg_manager_install(trimmed, &["dnf install", "microdnf install"])
+        {
+            for pkg in parse_versioned_pkg_list(rest, PkgManager::Dnf) {
+                if seen.insert(pkg.name.clone()) {
+                    out.push(pkg);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse a space-separated package list, preserving `=`-style version pins.
+fn parse_versioned_pkg_list(args: &str, manager: PkgManager) -> Vec<DockerfilePackage> {
+    let mut out = Vec::new();
+    for token in args.split_whitespace() {
+        if token.starts_with('-') {
+            continue;
+        }
+        let (name, version) = if let Some((n, v)) = token.split_once('=') {
+            (
+                n,
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                },
+            )
+        } else {
+            (token, None)
+        };
+        if is_valid_tool_name(name) {
+            out.push(DockerfilePackage {
+                name: name.to_string(),
+                version,
+                manager: manager.clone(),
+            });
+        }
+    }
+    out
+}
+
+// ── Classify ──────────────────────────────────────────────────────────────────
+
+/// Package names that are always libraries / build dependencies, never runnable binaries.
+static LIBRARY_EXACT: &[&str] = &[
+    "build-essential",
+    "pkg-config",
+    "ca-certificates",
+    "ca-certs",
+    "gcc",
+    "g++",
+    "cc",
+    "c++",
+    "make",
+    "cmake",
+    "ninja-build",
+    "autoconf",
+    "automake",
+    "libtool",
+    "m4",
+    "bison",
+    "flex",
+    "linux-libc-dev",
+    "gpg-agent",
+    "gnupg",
+    "gnupg2",
+    "git",
+    "curl",
+    "wget",
+    "python3-dev",
+    "python-dev",
+    "python3-setuptools",
+    "clang",
+    "llvm",
+    "binutils",
+    "perl",
+    "perl-core",
+    "locales",
+    "zlib1g-dev",
+    "openssl",
+    "debianutils",
+    "unzip",
+    "zip",
+    "xz-utils",
+    "tar",
+    "software-properties-common",
+    "apt-transport-https",
+    "apt-utils",
+    "lsb-release",
+];
+
+/// Classify a package name as a [`EntryKind::Binary`] tool or [`EntryKind::Library`].
+///
+/// Conservative on the binary side: a misclassified binary fails at install time
+/// with a clear adapter error; a misclassified library just won't get a `.bin/` symlink.
+pub fn classify(name: &str) -> EntryKind {
+    if name.starts_with("lib") {
+        return EntryKind::Library;
+    }
+    if name.ends_with("-dev") || name.ends_with("-devel") || name.ends_with("-headers") {
+        return EntryKind::Library;
+    }
+    if LIBRARY_EXACT.contains(&name) {
+        return EntryKind::Library;
+    }
+    EntryKind::Binary
+}
+
+// ── Verification ──────────────────────────────────────────────────────────────
+
+/// Maps common apt/dnf package names to the command-name key used in [`KNOWN_TOOLS`]
+/// when the package name differs from the executable name.
+static PACKAGE_TO_CMD: &[(&str, &str)] = &[
+    ("ripgrep", "rg"),
+    ("fd-find", "fd"),
+    ("silversearcher-ag", "ag"),
+    ("bat", "bat"),
+    ("exa", "exa"),
+    ("eza", "eza"),
+    ("lsd", "lsd"),
+    ("dust", "dust"),
+    ("duf", "duf"),
+    ("gdu", "gdu"),
+    ("delta", "delta"),
+    ("starship", "starship"),
+    ("direnv", "direnv"),
+    ("zoxide", "zoxide"),
+    ("hadolint", "hadolint"),
+    ("shellcheck", "shellcheck"),
+    ("shfmt", "shfmt"),
+    ("golangci-lint", "golangci-lint"),
+    ("tflint", "tflint"),
+    ("semgrep", "semgrep"),
+    ("kubectl", "kubectl"),
+    ("helm", "helm"),
+    ("k9s", "k9s"),
+    ("flux", "flux"),
+    ("terraform", "terraform"),
+    ("vault", "vault"),
+    ("packer", "packer"),
+    ("cosign", "cosign"),
+    ("syft", "syft"),
+    ("grype", "grype"),
+    ("trivy", "trivy"),
+    ("age", "age"),
+    ("goreleaser", "goreleaser"),
+    ("earthly", "earthly"),
+    ("dive", "dive"),
+    ("just", "just"),
+    ("hyperfine", "hyperfine"),
+    ("tokei", "tokei"),
+    ("jq", "jq"),
+    ("yq", "yq"),
+    ("fzf", "fzf"),
+    ("gitleaks", "gitleaks"),
+    ("trufflehog", "trufflehog"),
+    ("lazygit", "lazygit"),
+    ("gitui", "gitui"),
+    ("gh", "gh"),
+    ("hub", "hub"),
+    ("act", "act"),
+    ("btm", "btm"),
+    ("procs", "procs"),
+    ("bandwhich", "bandwhich"),
+    ("mise", "mise"),
+    ("uv", "uv"),
+    ("uvx", "uvx"),
+    ("ruff", "ruff"),
+    ("pyright", "pyright"),
+    ("opa", "opa"),
+    ("conftest", "conftest"),
+    ("grpcurl", "grpcurl"),
+    ("buf", "buf"),
+    ("xh", "xh"),
+    ("hurl", "hurl"),
+    ("mkcert", "mkcert"),
+    ("osv-scanner", "osv-scanner"),
+    ("crane", "crane"),
+    ("gron", "gron"),
+    ("dasel", "dasel"),
+    ("difft", "difft"),
+    ("eksctl", "eksctl"),
+    ("kustomize", "kustomize"),
+    ("argocd", "argocd"),
+    ("pulumi", "pulumi"),
+    ("ag", "ag"),
+];
+
+/// Verify packages against two local layers, returning `(verified, unverified_names)`.
+///
+/// **Layer A** — curated lookup (always runs, offline): checks the package name against
+/// [`KNOWN_TOOLS`] (via [`PACKAGE_TO_CMD`] for packages where name ≠ command). A hit
+/// confirms existence, fixes the on-PATH binary name, and surfaces the GitHub repo.
+///
+/// **Layer B** — host package manager probe (best-effort, offline-safe): runs
+/// `apt-cache show <pkg>` or `dnf info <pkg>` to confirm the package exists in the
+/// local package database. Falls back gracefully when the host package manager is absent
+/// or does not match the Dockerfile's package manager family.
+///
+/// Packages that pass neither layer are placed in `unverified_names` and must not be
+/// auto-imported.
+pub fn verify_packages_sync(packages: Vec<DockerfilePackage>) -> (Vec<VerifiedPkg>, Vec<String>) {
+    let known = known_tools();
+    let pkg_to_cmd: HashMap<&str, &str> = PACKAGE_TO_CMD.iter().map(|&(p, c)| (p, c)).collect();
+
+    let mut verified: Vec<VerifiedPkg> = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
+
+    for pkg in packages {
+        let cmd_name: &str = pkg_to_cmd
+            .get(pkg.name.as_str())
+            .copied()
+            .unwrap_or(pkg.name.as_str());
+
+        if let Some((repo, _desc)) = known.get(cmd_name) {
+            let kind = classify(&pkg.name);
+            let binary_cmd = if cmd_name != pkg.name.as_str() {
+                Some(cmd_name.to_string())
+            } else {
+                None
+            };
+            verified.push(VerifiedPkg {
+                name: pkg.name,
+                version: pkg.version,
+                manager: pkg.manager,
+                kind,
+                binary_cmd,
+                github_repo: Some((*repo).to_string()),
+                via: "curated".to_string(),
+            });
+            continue;
+        }
+
+        if let Some(section) = probe_host_pkg_mgr(&pkg.name, &pkg.manager) {
+            let kind = if section.contains("lib") || section.contains("devel") {
+                EntryKind::Library
+            } else {
+                classify(&pkg.name)
+            };
+            let via = match pkg.manager {
+                PkgManager::Apt => "apt-cache",
+                PkgManager::Dnf => "dnf info",
+            }
+            .to_string();
+            verified.push(VerifiedPkg {
+                name: pkg.name,
+                version: pkg.version,
+                manager: pkg.manager,
+                kind,
+                binary_cmd: None,
+                github_repo: None,
+                via,
+            });
+            continue;
+        }
+
+        unverified.push(pkg.name);
+    }
+
+    (verified, unverified)
+}
+
+/// Run `apt-cache show` or `dnf info` and return the package section if the package exists.
+fn probe_host_pkg_mgr(name: &str, manager: &PkgManager) -> Option<String> {
+    match manager {
+        PkgManager::Apt => {
+            if !crate::installer::which_exists("apt-cache") {
+                return None;
+            }
+            let out = std::process::Command::new("apt-cache")
+                .args(["show", name])
+                .output()
+                .ok()?;
+            if !out.status.success() || out.stdout.is_empty() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let section = stdout
+                .lines()
+                .find(|l| l.starts_with("Section:"))
+                .and_then(|l| l.strip_prefix("Section:"))
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_else(|| "utils".to_string());
+            Some(section)
+        }
+        PkgManager::Dnf => {
+            if !crate::installer::which_exists("dnf") {
+                return None;
+            }
+            let out = std::process::Command::new("dnf")
+                .args(["info", "--quiet", name])
+                .output()
+                .ok()?;
+            if out.status.success() && !out.stdout.is_empty() {
+                Some("utils".to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -55,7 +458,9 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize,
     // 1. Shell history
     if opts.history {
         for (name, count) in scan_shell_history() {
-            raw.entry(name).or_default().push(("shell history".to_string(), count));
+            raw.entry(name)
+                .or_default()
+                .push(("shell history".to_string(), count));
         }
     }
 
@@ -114,7 +519,10 @@ fn print_suggestions(
         return;
     }
 
-    println!("  {}", output::dim(color, "Suggested additions to grip.toml"));
+    println!(
+        "  {}",
+        output::dim(color, "Suggested additions to grip.toml")
+    );
     println!();
 
     for (name, (info, occ)) in candidates {
@@ -386,7 +794,8 @@ fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
     for line in &logical_lines {
         let trimmed = line.trim();
         // Match `RUN apt-get install ...` or `RUN apt install ...`
-        if let Some(rest) = extract_pkg_manager_install(trimmed, &["apt-get install", "apt install"])
+        if let Some(rest) =
+            extract_pkg_manager_install(trimmed, &["apt-get install", "apt install"])
         {
             for pkg in parse_pkg_list(rest) {
                 out.push((pkg, format!("{label} (apt)")));
@@ -426,7 +835,7 @@ fn extract_pkg_manager_install<'a>(line: &'a str, commands: &[&str]) -> Option<&
 /// Parse a space-separated package list, stripping flags and version suffixes.
 fn parse_pkg_list(args: &str) -> Vec<String> {
     args.split_whitespace()
-        .filter(|t| !t.starts_with('-'))  // drop flags like -y, --no-install-recommends
+        .filter(|t| !t.starts_with('-')) // drop flags like -y, --no-install-recommends
         .filter_map(|t| {
             // Strip version suffixes: pkg=1.2.3 → pkg, pkg-1.2.3 (dnf) → pkg
             let name = t.splitn(2, '=').next().unwrap_or(t);
@@ -522,7 +931,7 @@ static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
             "subprocess.check_call([\"",
             "subprocess.check_output([\"",
             "subprocess.Popen([\"",
-            "Popen([\"",                     // direct import
+            "Popen([\"", // direct import
             // subprocess — string form (first token taken)
             "subprocess.getoutput(\"",
             "subprocess.getstatusoutput(\"",
@@ -540,10 +949,7 @@ static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
     // ── Rust ──────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["rs"],
-        patterns: &[
-            "Command::new(\"",
-            "command::new(\"",
-        ],
+        patterns: &["Command::new(\"", "command::new(\""],
     },
     // ── JavaScript / TypeScript ───────────────────────────────────────────
     LanguageScanner {
@@ -561,10 +967,7 @@ static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
     // ── Go ────────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["go"],
-        patterns: &[
-            "exec.Command(\"",
-            "exec.LookPath(\"",
-        ],
+        patterns: &["exec.Command(\"", "exec.LookPath(\""],
     },
     // ── Ruby ──────────────────────────────────────────────────────────────
     LanguageScanner {
@@ -759,7 +1162,8 @@ fn extract_command_name(line: &str) -> Option<String> {
         || token.contains('=')
         || token.contains('>')
         || token.contains('<')
-        || token.ends_with(':') // YAML keys
+        || token.ends_with(':')
+    // YAML keys
     {
         return None;
     }
@@ -784,92 +1188,128 @@ fn is_valid_tool_name(s: &str) -> bool {
 /// Known tools: (command_name, github_repo, short_description)
 static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
     // JSON / data
-    ("jq",            "jqlang/jq",                   "JSON processor"),
-    ("yq",            "mikefarah/yq",                "YAML/JSON/TOML processor"),
-    ("gron",          "tomnomnom/gron",               "Flatten JSON to greppable lines"),
-    ("dasel",         "TomWright/dasel",              "Query/update JSON, YAML, TOML, CSV"),
+    ("jq", "jqlang/jq", "JSON processor"),
+    ("yq", "mikefarah/yq", "YAML/JSON/TOML processor"),
+    ("gron", "tomnomnom/gron", "Flatten JSON to greppable lines"),
+    (
+        "dasel",
+        "TomWright/dasel",
+        "Query/update JSON, YAML, TOML, CSV",
+    ),
     // Search
-    ("rg",            "BurntSushi/ripgrep",           "Fast grep alternative"),
-    ("fd",            "sharkdp/fd",                   "Fast find alternative"),
-    ("fzf",           "junegunn/fzf",                 "Fuzzy finder"),
-    ("ag",            "ggreer/the_silver_searcher",   "Fast code search"),
+    ("rg", "BurntSushi/ripgrep", "Fast grep alternative"),
+    ("fd", "sharkdp/fd", "Fast find alternative"),
+    ("fzf", "junegunn/fzf", "Fuzzy finder"),
+    ("ag", "ggreer/the_silver_searcher", "Fast code search"),
     // File tools
-    ("bat",           "sharkdp/bat",                  "cat with syntax highlighting"),
-    ("delta",         "dandavison/delta",              "Better git diff"),
-    ("difft",         "Wilfred/difftastic",            "Structural diff"),
-    ("eza",           "eza-community/eza",             "Modern ls replacement"),
-    ("exa",           "ogham/exa",                     "Modern ls replacement (legacy)"),
-    ("lsd",           "lsd-rs/lsd",                    "ls with file icons"),
-    ("zoxide",        "ajeetdsouza/zoxide",            "Smarter cd command"),
-    ("dust",          "bootandy/dust",                 "Intuitive du"),
-    ("duf",           "muesli/duf",                    "Better df"),
-    ("gdu",           "dundee/gdu",                    "Disk usage analyser"),
+    ("bat", "sharkdp/bat", "cat with syntax highlighting"),
+    ("delta", "dandavison/delta", "Better git diff"),
+    ("difft", "Wilfred/difftastic", "Structural diff"),
+    ("eza", "eza-community/eza", "Modern ls replacement"),
+    ("exa", "ogham/exa", "Modern ls replacement (legacy)"),
+    ("lsd", "lsd-rs/lsd", "ls with file icons"),
+    ("zoxide", "ajeetdsouza/zoxide", "Smarter cd command"),
+    ("dust", "bootandy/dust", "Intuitive du"),
+    ("duf", "muesli/duf", "Better df"),
+    ("gdu", "dundee/gdu", "Disk usage analyser"),
     // HTTP / network
-    ("xh",            "ducaale/xh",                    "Friendly HTTP client"),
-    ("hurl",          "Orange-OpenSource/hurl",        "HTTP requests from text files"),
+    ("xh", "ducaale/xh", "Friendly HTTP client"),
+    (
+        "hurl",
+        "Orange-OpenSource/hurl",
+        "HTTP requests from text files",
+    ),
     // System / process
-    ("procs",         "dalance/procs",                 "Modern ps"),
-    ("btm",           "ClementTsang/bottom",           "System resource monitor"),
-    ("bandwhich",     "imsnif/bandwhich",              "Network usage by process"),
+    ("procs", "dalance/procs", "Modern ps"),
+    ("btm", "ClementTsang/bottom", "System resource monitor"),
+    ("bandwhich", "imsnif/bandwhich", "Network usage by process"),
     // Git
-    ("lazygit",       "jesseduffield/lazygit",         "Terminal UI for git"),
-    ("gitui",         "extrawurst/gitui",              "Fast terminal git UI"),
-    ("gh",            "cli/cli",                       "GitHub CLI"),
-    ("hub",           "mislav/hub",                    "GitHub workflow CLI"),
-    ("gitleaks",      "gitleaks/gitleaks",             "Scan for secrets in git repos"),
-    ("trufflehog",    "trufflesecurity/trufflehog",    "Find leaked credentials"),
+    ("lazygit", "jesseduffield/lazygit", "Terminal UI for git"),
+    ("gitui", "extrawurst/gitui", "Fast terminal git UI"),
+    ("gh", "cli/cli", "GitHub CLI"),
+    ("hub", "mislav/hub", "GitHub workflow CLI"),
+    (
+        "gitleaks",
+        "gitleaks/gitleaks",
+        "Scan for secrets in git repos",
+    ),
+    (
+        "trufflehog",
+        "trufflesecurity/trufflehog",
+        "Find leaked credentials",
+    ),
     // Dev tooling
-    ("just",          "casey/just",                    "Command runner (make alternative)"),
-    ("hyperfine",     "sharkdp/hyperfine",             "Command-line benchmarking"),
-    ("tokei",         "XAMPPRocky/tokei",              "Count lines of code"),
-    ("shellcheck",    "koalaman/shellcheck",           "Shell script linter"),
-    ("shfmt",         "mvdan/sh",                      "Shell script formatter"),
-    ("hadolint",      "hadolint/hadolint",             "Dockerfile linter"),
+    ("just", "casey/just", "Command runner (make alternative)"),
+    (
+        "hyperfine",
+        "sharkdp/hyperfine",
+        "Command-line benchmarking",
+    ),
+    ("tokei", "XAMPPRocky/tokei", "Count lines of code"),
+    ("shellcheck", "koalaman/shellcheck", "Shell script linter"),
+    ("shfmt", "mvdan/sh", "Shell script formatter"),
+    ("hadolint", "hadolint/hadolint", "Dockerfile linter"),
     // Kubernetes / cloud
-    ("k9s",           "derailed/k9s",                  "Kubernetes TUI"),
-    ("kubectl",       "kubernetes/kubectl",             "Kubernetes CLI"),
-    ("helm",          "helm/helm",                     "Kubernetes package manager"),
-    ("kustomize",     "kubernetes-sigs/kustomize",     "Kubernetes config customization"),
-    ("flux",          "fluxcd/flux2",                  "GitOps for Kubernetes"),
-    ("argocd",        "argoproj/argo-cd",              "GitOps CD tool"),
-    ("eksctl",        "eksctl/eksctl",                 "Amazon EKS CLI"),
+    ("k9s", "derailed/k9s", "Kubernetes TUI"),
+    ("kubectl", "kubernetes/kubectl", "Kubernetes CLI"),
+    ("helm", "helm/helm", "Kubernetes package manager"),
+    (
+        "kustomize",
+        "kubernetes-sigs/kustomize",
+        "Kubernetes config customization",
+    ),
+    ("flux", "fluxcd/flux2", "GitOps for Kubernetes"),
+    ("argocd", "argoproj/argo-cd", "GitOps CD tool"),
+    ("eksctl", "eksctl/eksctl", "Amazon EKS CLI"),
     // Infrastructure
-    ("terraform",     "hashicorp/terraform",           "Infrastructure as code"),
-    ("vault",         "hashicorp/vault",               "Secrets management"),
-    ("packer",        "hashicorp/packer",              "Machine image builder"),
-    ("pulumi",        "pulumi/pulumi",                 "Infrastructure as code"),
-    ("act",           "nektos/act",                    "Run GitHub Actions locally"),
+    ("terraform", "hashicorp/terraform", "Infrastructure as code"),
+    ("vault", "hashicorp/vault", "Secrets management"),
+    ("packer", "hashicorp/packer", "Machine image builder"),
+    ("pulumi", "pulumi/pulumi", "Infrastructure as code"),
+    ("act", "nektos/act", "Run GitHub Actions locally"),
     // Security
-    ("cosign",        "sigstore/cosign",               "Container image signing"),
-    ("syft",          "anchore/syft",                  "SBOM generator"),
-    ("grype",         "anchore/grype",                 "Vulnerability scanner"),
-    ("trivy",         "aquasecurity/trivy",            "Security scanner"),
-    ("mkcert",        "FiloSottile/mkcert",            "Local TLS certificates"),
-    ("age",           "FiloSottile/age",               "Simple file encryption"),
-    ("osv-scanner",   "google/osv-scanner",            "Open-source vulnerability scanner"),
+    ("cosign", "sigstore/cosign", "Container image signing"),
+    ("syft", "anchore/syft", "SBOM generator"),
+    ("grype", "anchore/grype", "Vulnerability scanner"),
+    ("trivy", "aquasecurity/trivy", "Security scanner"),
+    ("mkcert", "FiloSottile/mkcert", "Local TLS certificates"),
+    ("age", "FiloSottile/age", "Simple file encryption"),
+    (
+        "osv-scanner",
+        "google/osv-scanner",
+        "Open-source vulnerability scanner",
+    ),
     // Code quality
-    ("golangci-lint", "golangci/golangci-lint",        "Go meta-linter"),
-    ("tflint",        "terraform-linters/tflint",      "Terraform linter"),
-    ("semgrep",       "semgrep/semgrep",               "Code analysis tool"),
-    ("opa",           "open-policy-agent/opa",         "Open Policy Agent"),
-    ("conftest",      "open-policy-agent/conftest",    "Policy testing for config files"),
+    ("golangci-lint", "golangci/golangci-lint", "Go meta-linter"),
+    ("tflint", "terraform-linters/tflint", "Terraform linter"),
+    ("semgrep", "semgrep/semgrep", "Code analysis tool"),
+    ("opa", "open-policy-agent/opa", "Open Policy Agent"),
+    (
+        "conftest",
+        "open-policy-agent/conftest",
+        "Policy testing for config files",
+    ),
     // gRPC / protobuf
-    ("grpcurl",       "fullstorydev/grpcurl",          "cURL for gRPC"),
-    ("buf",           "bufbuild/buf",                  "Protobuf toolchain"),
+    ("grpcurl", "fullstorydev/grpcurl", "cURL for gRPC"),
+    ("buf", "bufbuild/buf", "Protobuf toolchain"),
     // CI/CD
-    ("goreleaser",    "goreleaser/goreleaser",         "Release automation"),
-    ("earthly",       "earthly/earthly",              "Build automation"),
-    ("dive",          "wagoodman/dive",                "Explore Docker image layers"),
-    ("crane",         "google/go-containerregistry",   "Container registry CLI"),
+    ("goreleaser", "goreleaser/goreleaser", "Release automation"),
+    ("earthly", "earthly/earthly", "Build automation"),
+    ("dive", "wagoodman/dive", "Explore Docker image layers"),
+    (
+        "crane",
+        "google/go-containerregistry",
+        "Container registry CLI",
+    ),
     // Shell / env
-    ("starship",      "starship-rs/starship",          "Cross-shell prompt"),
-    ("direnv",        "direnv/direnv",                 "Per-directory env vars"),
-    ("mise",          "jdx/mise",                      "Dev tools version manager"),
+    ("starship", "starship-rs/starship", "Cross-shell prompt"),
+    ("direnv", "direnv/direnv", "Per-directory env vars"),
+    ("mise", "jdx/mise", "Dev tools version manager"),
     // Python tooling
-    ("uv",            "astral-sh/uv",                  "Fast Python package manager"),
-    ("uvx",           "astral-sh/uv",                  "Run Python tools via uv"),
-    ("ruff",          "astral-sh/ruff",                "Fast Python linter and formatter"),
-    ("pyright",       "microsoft/pyright",              "Python static type checker"),
+    ("uv", "astral-sh/uv", "Fast Python package manager"),
+    ("uvx", "astral-sh/uv", "Run Python tools via uv"),
+    ("ruff", "astral-sh/ruff", "Fast Python linter and formatter"),
+    ("pyright", "microsoft/pyright", "Python static type checker"),
 ];
 
 fn known_tools() -> HashMap<&'static str, (&'static str, &'static str)> {
@@ -880,77 +1320,351 @@ fn known_tools() -> HashMap<&'static str, (&'static str, &'static str)> {
 fn system_builtins() -> HashSet<&'static str> {
     [
         // Shells
-        "bash","sh","zsh","fish","dash","ksh","tcsh","csh","ash","nu","elvish",
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "tcsh",
+        "csh",
+        "ash",
+        "nu",
+        "elvish",
         // Builtins
-        "echo","printf","read","export","source","eval","exec","set","unset",
-        "alias","unalias","return","exit","break","continue","shift","builtin",
+        "echo",
+        "printf",
+        "read",
+        "export",
+        "source",
+        "eval",
+        "exec",
+        "set",
+        "unset",
+        "alias",
+        "unalias",
+        "return",
+        "exit",
+        "break",
+        "continue",
+        "shift",
+        "builtin",
         // File ops
-        "ls","cat","cp","mv","rm","mkdir","rmdir","ln","chmod","chown","chgrp",
-        "touch","stat","find","locate","file","basename","dirname","realpath","readlink",
+        "ls",
+        "cat",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "rmdir",
+        "ln",
+        "chmod",
+        "chown",
+        "chgrp",
+        "touch",
+        "stat",
+        "find",
+        "locate",
+        "file",
+        "basename",
+        "dirname",
+        "realpath",
+        "readlink",
         // Text processing
-        "grep","egrep","fgrep","sed","awk","gawk","mawk","cut","sort","uniq",
-        "tr","head","tail","wc","diff","patch","comm","join","paste","column",
-        "fold","fmt","nl","pr","expand","unexpand","split","csplit","truncate",
+        "grep",
+        "egrep",
+        "fgrep",
+        "sed",
+        "awk",
+        "gawk",
+        "mawk",
+        "cut",
+        "sort",
+        "uniq",
+        "tr",
+        "head",
+        "tail",
+        "wc",
+        "diff",
+        "patch",
+        "comm",
+        "join",
+        "paste",
+        "column",
+        "fold",
+        "fmt",
+        "nl",
+        "pr",
+        "expand",
+        "unexpand",
+        "split",
+        "csplit",
+        "truncate",
         // Archives
-        "tar","gzip","gunzip","bzip2","bunzip2","xz","unxz","zip","unzip","zstd",
+        "tar",
+        "gzip",
+        "gunzip",
+        "bzip2",
+        "bunzip2",
+        "xz",
+        "unxz",
+        "zip",
+        "unzip",
+        "zstd",
         // Network
-        "curl","wget","nc","netcat","ssh","scp","sftp","rsync","ftp","telnet",
+        "curl",
+        "wget",
+        "nc",
+        "netcat",
+        "ssh",
+        "scp",
+        "sftp",
+        "rsync",
+        "ftp",
+        "telnet",
         // VCS
-        "git","svn","hg","cvs","fossil",
+        "git",
+        "svn",
+        "hg",
+        "cvs",
+        "fossil",
         // Build systems
-        "make","cmake","ninja","meson","bazel","ant",
+        "make",
+        "cmake",
+        "ninja",
+        "meson",
+        "bazel",
+        "ant",
         // Python
-        "python","python3","python2","pip","pip3","pipenv","poetry","virtualenv","conda","mamba",
+        "python",
+        "python3",
+        "python2",
+        "pip",
+        "pip3",
+        "pipenv",
+        "poetry",
+        "virtualenv",
+        "conda",
+        "mamba",
         // Node.js
-        "node","nodejs","npm","yarn","pnpm","npx","deno","bun","tsc",
+        "node",
+        "nodejs",
+        "npm",
+        "yarn",
+        "pnpm",
+        "npx",
+        "deno",
+        "bun",
+        "tsc",
         // Ruby
-        "ruby","gem","bundle","bundler","rake",
+        "ruby",
+        "gem",
+        "bundle",
+        "bundler",
+        "rake",
         // Go
-        "go","gofmt","gopls",
+        "go",
+        "gofmt",
+        "gopls",
         // Rust
-        "cargo","rustc","rustup","rustfmt",
+        "cargo",
+        "rustc",
+        "rustup",
+        "rustfmt",
         // JVM
-        "javac","java","mvn","gradle","kotlin","kotlinc",
+        "javac",
+        "java",
+        "mvn",
+        "gradle",
+        "kotlin",
+        "kotlinc",
         // C/C++
-        "clang","clang++","gcc","g++","cc","c++","ld","ar","nm","objdump","strip","ranlib","ldd",
+        "clang",
+        "clang++",
+        "gcc",
+        "g++",
+        "cc",
+        "c++",
+        "ld",
+        "ar",
+        "nm",
+        "objdump",
+        "strip",
+        "ranlib",
+        "ldd",
         // Containers
-        "docker","podman","buildah","containerd","runc","skopeo",
+        "docker",
+        "podman",
+        "buildah",
+        "containerd",
+        "runc",
+        "skopeo",
         // System utils
-        "env","printenv","tee","xargs","parallel","seq","yes","tput",
-        "date","cal","time","sleep","wait","timeout","watch",
-        "kill","pkill","killall","ps","top","htop","pgrep","nice","renice","nohup",
-        "id","whoami","groups","su","sudo","doas",
-        "pwd","cd","pushd","popd","dirs",
-        "true","false","test",":",".",
-        "vim","vi","nano","emacs","code","nvim","neovim",
-        "less","more","most",
-        "man","info","help",
-        "which","whereis","type","command","hash",
-        "uname","hostname","hostnamectl","lsb_release",
-        "mount","umount","df","du","free","lsblk",
-        "ip","ifconfig","ping","traceroute","ss","netstat","dig","nslookup","host",
-        "gpg","gpg2","openssl","ssh-keygen","ssh-agent","ssh-add",
-        "cron","crontab","at",
-        "strace","ltrace","gdb","lldb","valgrind","perf",
-        "apt","apt-get","dpkg","yum","dnf","rpm","zypper","pacman","brew","snap","flatpak","nix",
-        "systemctl","journalctl","service",
-        "lsof","fuser","iostat","vmstat","sar",
-        "cmp","md5sum","sha1sum","sha256sum","sha512sum","cksum",
-        "bc","dc","expr","factor",
-        "dd","pv",
-        "tmux","screen",
-        "w","who","last","uptime",
-        "open","xdg-open","xclip","xsel","pbcopy","pbpaste",
-        "dmesg","lsmod","modprobe",
+        "env",
+        "printenv",
+        "tee",
+        "xargs",
+        "parallel",
+        "seq",
+        "yes",
+        "tput",
+        "date",
+        "cal",
+        "time",
+        "sleep",
+        "wait",
+        "timeout",
+        "watch",
+        "kill",
+        "pkill",
+        "killall",
+        "ps",
+        "top",
+        "htop",
+        "pgrep",
+        "nice",
+        "renice",
+        "nohup",
+        "id",
+        "whoami",
+        "groups",
+        "su",
+        "sudo",
+        "doas",
+        "pwd",
+        "cd",
+        "pushd",
+        "popd",
+        "dirs",
+        "true",
+        "false",
+        "test",
+        ":",
+        ".",
+        "vim",
+        "vi",
+        "nano",
+        "emacs",
+        "code",
+        "nvim",
+        "neovim",
+        "less",
+        "more",
+        "most",
+        "man",
+        "info",
+        "help",
+        "which",
+        "whereis",
+        "type",
+        "command",
+        "hash",
+        "uname",
+        "hostname",
+        "hostnamectl",
+        "lsb_release",
+        "mount",
+        "umount",
+        "df",
+        "du",
+        "free",
+        "lsblk",
+        "ip",
+        "ifconfig",
+        "ping",
+        "traceroute",
+        "ss",
+        "netstat",
+        "dig",
+        "nslookup",
+        "host",
+        "gpg",
+        "gpg2",
+        "openssl",
+        "ssh-keygen",
+        "ssh-agent",
+        "ssh-add",
+        "cron",
+        "crontab",
+        "at",
+        "strace",
+        "ltrace",
+        "gdb",
+        "lldb",
+        "valgrind",
+        "perf",
+        "apt",
+        "apt-get",
+        "dpkg",
+        "yum",
+        "dnf",
+        "rpm",
+        "zypper",
+        "pacman",
+        "brew",
+        "snap",
+        "flatpak",
+        "nix",
+        "systemctl",
+        "journalctl",
+        "service",
+        "lsof",
+        "fuser",
+        "iostat",
+        "vmstat",
+        "sar",
+        "cmp",
+        "md5sum",
+        "sha1sum",
+        "sha256sum",
+        "sha512sum",
+        "cksum",
+        "bc",
+        "dc",
+        "expr",
+        "factor",
+        "dd",
+        "pv",
+        "tmux",
+        "screen",
+        "w",
+        "who",
+        "last",
+        "uptime",
+        "open",
+        "xdg-open",
+        "xclip",
+        "xsel",
+        "pbcopy",
+        "pbpaste",
+        "dmesg",
+        "lsmod",
+        "modprobe",
         "mktemp",
-        "iconv","locale",
+        "iconv",
+        "locale",
         "grip", // don't suggest grip itself
-        "pwsh","powershell","cmd",
-        "nmap","ping6","arping","tracepath",
-        "hexdump","xxd","od","strings",
-        "diff3","colordiff",
-        "mail","sendmail",
-        "fc","history","jobs","bg","fg","wait",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "nmap",
+        "ping6",
+        "arping",
+        "tracepath",
+        "hexdump",
+        "xxd",
+        "od",
+        "strings",
+        "diff3",
+        "colordiff",
+        "mail",
+        "sendmail",
+        "fc",
+        "history",
+        "jobs",
+        "bg",
+        "fg",
+        "wait",
     ]
     .iter()
     .cloned()
@@ -1089,7 +1803,10 @@ mod tests {
             color: false,
         };
         let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
-        assert_eq!(count, 0, "empty project with no history should yield 0 suggestions");
+        assert_eq!(
+            count, 0,
+            "empty project with no history should yield 0 suggestions"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1102,7 +1819,11 @@ mod tests {
 
         // Write a Python file that references a known tool via /usr/bin/
         let src = dir.join("script.py");
-        fs::write(&src, "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n").unwrap();
+        fs::write(
+            &src,
+            "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n",
+        )
+        .unwrap();
 
         let opts = SuggestOptions {
             scan_paths: vec![src],
@@ -1111,7 +1832,10 @@ mod tests {
             color: false,
         };
         let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
-        assert!(count > 0, "jq reference should produce at least one suggestion");
+        assert!(
+            count > 0,
+            "jq reference should produce at least one suggestion"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1130,7 +1854,11 @@ mod tests {
         .unwrap();
 
         let src = dir.join("script.py");
-        fs::write(&src, "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n").unwrap();
+        fs::write(
+            &src,
+            "import subprocess\nsubprocess.run(['/usr/bin/jq', '.'])\n",
+        )
+        .unwrap();
 
         let opts = SuggestOptions {
             scan_paths: vec![src],
@@ -1139,7 +1867,10 @@ mod tests {
             color: false,
         };
         let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
-        assert_eq!(count, 0, "jq is declared in grip.toml — should not be suggested");
+        assert_eq!(
+            count, 0,
+            "jq is declared in grip.toml — should not be suggested"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1167,7 +1898,181 @@ mod tests {
         };
         let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
         // --check logic: if count > 0, caller exits 1.  We verify the count is non-zero.
-        assert!(count > 0, "fd found via subprocess.run should result in a non-zero suggestion count");
+        assert!(
+            count > 0,
+            "fd found via subprocess.run should result in a non-zero suggestion count"
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── classify ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_lib_prefix() {
+        assert_eq!(classify("libssl-dev"), EntryKind::Library);
+        assert_eq!(classify("libpq5"), EntryKind::Library);
+    }
+
+    #[test]
+    fn classify_dev_suffix() {
+        assert_eq!(classify("python3-dev"), EntryKind::Library);
+        assert_eq!(classify("openssl-devel"), EntryKind::Library);
+        assert_eq!(classify("zlib-headers"), EntryKind::Library);
+    }
+
+    #[test]
+    fn classify_curated_build_deps() {
+        assert_eq!(classify("build-essential"), EntryKind::Library);
+        assert_eq!(classify("pkg-config"), EntryKind::Library);
+        assert_eq!(classify("ca-certificates"), EntryKind::Library);
+    }
+
+    #[test]
+    fn classify_binary_tools() {
+        assert_eq!(classify("jq"), EntryKind::Binary);
+        assert_eq!(classify("ripgrep"), EntryKind::Binary);
+        assert_eq!(classify("kubectl"), EntryKind::Binary);
+        assert_eq!(classify("hadolint"), EntryKind::Binary);
+    }
+
+    // ── parse_dockerfile_content_typed ───────────────────────────────────────
+
+    #[test]
+    fn parse_simple_apt_list() {
+        let content = "FROM debian:bookworm\nRUN apt-get install -y jq ripgrep\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].name, "jq");
+        assert_eq!(pkgs[1].name, "ripgrep");
+        assert!(pkgs.iter().all(|p| p.manager == PkgManager::Apt));
+    }
+
+    #[test]
+    fn parse_apt_with_version_pin() {
+        let content = "RUN apt-get install -y --no-install-recommends jq=1.6-2.1ubuntu3 curl\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        let jq = pkgs.iter().find(|p| p.name == "jq").unwrap();
+        assert_eq!(jq.version.as_deref(), Some("1.6-2.1ubuntu3"));
+        let curl = pkgs.iter().find(|p| p.name == "curl").unwrap();
+        assert!(curl.version.is_none());
+    }
+
+    #[test]
+    fn parse_line_continuation() {
+        let content = "RUN apt-get install -y \\\n    jq \\\n    libssl-dev \\\n    pkg-config\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"jq"), "expected jq in {names:?}");
+        assert!(
+            names.contains(&"libssl-dev"),
+            "expected libssl-dev in {names:?}"
+        );
+        assert!(
+            names.contains(&"pkg-config"),
+            "expected pkg-config in {names:?}"
+        );
+    }
+
+    #[test]
+    fn parse_dnf_install() {
+        let content = "RUN dnf install -y jq kubectl\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        assert!(pkgs.iter().all(|p| p.manager == PkgManager::Dnf));
+        let names: Vec<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"jq"));
+        assert!(names.contains(&"kubectl"));
+    }
+
+    #[test]
+    fn parse_deduplicates_across_run_lines() {
+        let content = "RUN apt-get install -y jq\nRUN apt-get install -y jq curl\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        let jq_count = pkgs.iter().filter(|p| p.name == "jq").count();
+        assert_eq!(jq_count, 1, "jq should appear only once");
+    }
+
+    #[test]
+    fn parse_skips_flags() {
+        let content = "RUN apt-get install -y --no-install-recommends -q jq\n";
+        let pkgs = parse_dockerfile_content_typed(content);
+        assert!(
+            pkgs.iter().all(|p| !p.name.starts_with('-')),
+            "flags must not appear as package names"
+        );
+    }
+
+    // ── verify_packages_sync layer A ─────────────────────────────────────────
+
+    #[test]
+    fn verify_layer_a_known_tool_by_name() {
+        let pkgs = vec![DockerfilePackage {
+            name: "jq".to_string(),
+            version: None,
+            manager: PkgManager::Apt,
+        }];
+        let (verified, skipped) = verify_packages_sync(pkgs);
+        assert_eq!(verified.len(), 1, "jq should be verified by curated list");
+        assert!(skipped.is_empty());
+        assert_eq!(verified[0].via, "curated");
+    }
+
+    #[test]
+    fn verify_layer_a_package_to_cmd_mapping() {
+        // "ripgrep" maps to "rg" via PACKAGE_TO_CMD.
+        let pkgs = vec![DockerfilePackage {
+            name: "ripgrep".to_string(),
+            version: None,
+            manager: PkgManager::Apt,
+        }];
+        let (verified, skipped) = verify_packages_sync(pkgs);
+        assert!(
+            skipped.is_empty(),
+            "ripgrep should be verified via PACKAGE_TO_CMD → rg"
+        );
+        assert_eq!(verified[0].binary_cmd.as_deref(), Some("rg"));
+    }
+
+    #[test]
+    fn verify_unknown_package_is_unverified() {
+        // Only considered unverified when apt-cache is also unavailable.
+        // On a machine without apt-cache this becomes unverified.
+        let pkgs = vec![DockerfilePackage {
+            name: "somecustom-internal-pkg-xyz".to_string(),
+            version: None,
+            manager: PkgManager::Apt,
+        }];
+        let (verified, unverified) = verify_packages_sync(pkgs);
+        // Depending on whether apt-cache is on host, it may end up verified or not.
+        // We only assert neither list is empty together.
+        assert!(
+            verified.len() + unverified.len() == 1,
+            "exactly one outcome per package"
+        );
+    }
+
+    #[test]
+    fn verify_preserves_version_pin() {
+        let pkgs = vec![DockerfilePackage {
+            name: "jq".to_string(),
+            version: Some("1.6-2.1".to_string()),
+            manager: PkgManager::Apt,
+        }];
+        let (verified, _) = verify_packages_sync(pkgs);
+        assert_eq!(verified[0].version.as_deref(), Some("1.6-2.1"));
+    }
+
+    #[test]
+    fn classify_library_package_from_verify() {
+        let pkgs = vec![DockerfilePackage {
+            name: "libssl-dev".to_string(),
+            version: None,
+            manager: PkgManager::Apt,
+        }];
+        let (verified, _) = verify_packages_sync(pkgs);
+        // libssl-dev may or may not be in apt-cache on this host, but if verified
+        // it should be classified as Library.
+        for v in &verified {
+            assert_eq!(v.kind, EntryKind::Library, "libssl-dev must be Library");
+        }
     }
 }

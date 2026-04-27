@@ -96,7 +96,9 @@ impl GripError {
             ),
             GripError::GitHubApi(_) => Some("Check the repository name, release tags, and your network access."),
             GripError::InsufficientPrivileges { .. } => Some(
-                "Run grip as root, or configure passwordless sudo for apt-get/dnf.",
+                "Run grip as root, or configure passwordless sudo for apt-get/dnf. \
+                 Alternatively, switch the entry to `source = \"github\"` or `source = \"url\"` \
+                 for a sudo-free install into .bin/.",
             ),
             GripError::GpgNotFound => Some(
                 "Install gpg (e.g. `apt install gnupg` or `brew install gnupg`) \

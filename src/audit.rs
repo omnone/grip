@@ -57,7 +57,11 @@ pub async fn run_audit(opts: AuditOptions) -> Result<(), GripError> {
             "  {} Querying OSV for {} installed {}…",
             output::dim(opts.color, "·"),
             all_entries.len(),
-            if all_entries.len() == 1 { "tool" } else { "tools" }
+            if all_entries.len() == 1 {
+                "tool"
+            } else {
+                "tools"
+            }
         );
     }
 
@@ -135,7 +139,11 @@ fn print_findings(findings: &[(&LockEntry, &[OsvVuln])], total: usize, color: bo
         "  {} {} vulnerability {} found\n",
         output::fail_glyph(color),
         findings.len(),
-        if findings.len() == 1 { "finding" } else { "findings" }
+        if findings.len() == 1 {
+            "finding"
+        } else {
+            "findings"
+        }
     );
 
     for (entry, vulns) in findings {
@@ -169,7 +177,10 @@ fn print_findings(findings: &[(&LockEntry, &[OsvVuln])], total: usize, color: bo
 
     println!(
         "  {}",
-        output::dim(color, "Run `grip update <name>` to upgrade a vulnerable tool.")
+        output::dim(
+            color,
+            "Run `grip update <name>` to upgrade a vulnerable tool."
+        )
     );
     println!();
 }
@@ -257,10 +268,7 @@ mod tests {
         let vuln = &resp.results[0].vulns[0];
         assert_eq!(vuln.id, "GHSA-1234-5678-9012");
         assert_eq!(vuln.summary.as_deref(), Some("A critical vulnerability"));
-        assert_eq!(
-            vuln.aliases.as_ref().unwrap()[0],
-            "CVE-2023-12345"
-        );
+        assert_eq!(vuln.aliases.as_ref().unwrap()[0], "CVE-2023-12345");
     }
 
     #[test]

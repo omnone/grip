@@ -249,8 +249,8 @@ impl SourceAdapter for GithubAdapter {
         let extra_installed = extract_binary(tmp.path(), &asset_name, g, name, bin_dir)?;
 
         // Hash the installed binary, not the archive, so `grip lock verify` can re-check it.
-        let binary_sha256 = crate::checksum::sha256_file(&bin_dir.join(name))
-            .map_err(GripError::Io)?;
+        let binary_sha256 =
+            crate::checksum::sha256_file(&bin_dir.join(name)).map_err(GripError::Io)?;
 
         // Symlink into ~/.local/bin/ so the binary is on PATH without `grip env`.
         crate::bin_dir::link_to_user_path(bin_dir, name).ok();
