@@ -16,7 +16,7 @@ release:
 	sed -i 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
 	cargo build --release 2>/dev/null  # updates Cargo.lock
 	git add Cargo.toml Cargo.lock
-	git commit -m "chore: release v$(VERSION)"
+	git diff --cached --quiet || git commit -m "chore: release v$(VERSION)"
 	git push origin master
 
 # Run all unit tests (no Docker required).
