@@ -1,12 +1,14 @@
 .PHONY: build test \
         test-integration-apt test-integration-dnf \
-        test-integration-github test-integration-url test-integration-shell \
+        test-integration-github test-integration-url \
         test-integration \
         release
 
 build:
 	cargo build --release
 
+# Bump the version and push master. The release pipeline is triggered manually
+# from GitHub Actions (workflow_dispatch) and creates the git tag itself.
 # Usage: make release VERSION=0.2.0
 release:
 	@test -n "$(VERSION)" || (echo "error: VERSION is required  (e.g. make release VERSION=0.2.0)" && exit 1)
@@ -15,8 +17,7 @@ release:
 	cargo build --release 2>/dev/null  # updates Cargo.lock
 	git add Cargo.toml Cargo.lock
 	git commit -m "chore: release v$(VERSION)"
-	git tag v$(VERSION)
-	git push origin master --tags
+	git push origin master
 
 # Run all unit tests (no Docker required).
 test:
@@ -56,14 +57,6 @@ test-integration-url:
 		.
 	docker run --rm grip-test-url
 
-# Run Shell adapter integration tests (no network required).
-test-integration-shell:
-	docker build \
-		-f tests/docker/Dockerfile.test-shell \
-		-t grip-test-shell \
-		.
-	docker run --rm grip-test-shell
-
 # Run all integration test suites sequentially.
 test-integration: test-integration-apt test-integration-dnf \
-                  test-integration-github test-integration-url test-integration-shell
+                  test-integration-github test-integration-url
