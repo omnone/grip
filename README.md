@@ -4,14 +4,36 @@
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs/)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/omnone/grip/actions)
 
-**Your code has a lockfile. Your tools don't.**
+**Lock your project tools like you lock your code dependencies.**
 
-grip gives CLI tools the same treatment that npm gives packages and Cargo
-gives crates — declare them, lock them, sync them.
+grip is a per-project dependency manager for the command-line tools and system
+packages your repo needs to build, test, lint, release, or run in CI. Declare
+`jq`, `kubectl`, `shellcheck`, `ripgrep`, `libssl-dev`, or any other required
+tool once, then install the exact same versions everywhere.
+
+It works across the sources projects already use — GitHub Releases, direct
+download URLs, `apt`, `dnf`, and more — and records every resolved artifact in
+`grip.lock` with its version, URL, and SHA-256.
 
 Declare your tools in `grip.toml`. Run `grip sync`. Every developer, CI job,
-and Docker build gets the exact same binaries — same version, same SHA-256,
-no setup docs, no surprises.
+and Docker build gets the same bytes, with no setup wiki, no "latest" drift,
+and no machine-specific guessing.
+
+---
+
+## What grip is for
+
+Use grip when your project depends on tools that usually live outside your
+language package manager:
+
+- CLI utilities used by scripts, Makefiles, hooks, or CI workflows
+- Release and infrastructure tools such as `kubectl`, `terraform`, or `protoc`
+- System packages from `apt` or `dnf` that your Dockerfile currently installs
+- Libraries such as `libssl-dev` or `pkg-config` that native builds need
+
+Instead of documenting "please install these first", commit `grip.toml` and
+`grip.lock`. New machines and CI runners can reproduce the toolchain with one
+command.
 
 ---
 
@@ -23,6 +45,7 @@ Every project depends on CLI tools but there is no standard way to manage them:
 - CI pulls the *latest* release — until a breaking change breaks the build
 - Dockerfiles have versions copy-pasted from a wiki that nobody updates
 - A new teammate spends an afternoon installing things manually before they can run the project
+- `apt` and `dnf` packages are scattered across Dockerfiles, bootstrap scripts, and CI YAML
 
 This is a dependency problem, and it deserves a real solution.
 
@@ -36,7 +59,9 @@ Three pieces, one workflow:
 - A **lockfile** (`grip.lock`) — records the exact version, download URL, and SHA-256 of every tool
 - One command (`grip sync`) — installs everything reproducibly from the lockfile
 
-Commit both files. Every developer runs `grip sync` after pulling. That is the entire workflow.
+Commit both files. Every developer runs `grip sync` after pulling. CI runs
+`grip sync --locked`. Dockerfiles can be generated from the lockfile. That is
+the entire workflow.
 
 ---
 
