@@ -125,7 +125,7 @@ fn check_one_library(name: &str, entry: &LibraryEntry, lock: &LockFile) -> Check
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
             .unwrap_or(false),
         LibraryEntry::Dnf(d) => std::process::Command::new("rpm")
-            .args(["-q", &d.package])
+            .args(["-q", "--whatprovides", &d.package])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false),
@@ -297,7 +297,7 @@ pub fn run_check(tag: Option<&str>, root: Option<PathBuf>) -> Result<CheckResult
         }
     }
 
-    // ── Global consistency checks (formerly `grip doctor`) ──────────────────
+    // ── Global consistency checks ────────────────────────────────────────────
     // These are not per-entry — they check the overall state of the three files.
     // Tag filters do not apply here.
 

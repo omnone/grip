@@ -226,6 +226,35 @@ mod tests {
         assert_eq!(entry.sha256.as_deref(), Some("abc123"));
     }
 
+    /// apt/dnf entries produce lock entries where url and sha256 are None.
+    /// Verify the file round-trips without error and loads back identical data.
+    #[test]
+    fn save_and_load_roundtrip_apt_entry() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.lock");
+
+        let mut lf = LockFile::default();
+        lf.upsert(LockEntry {
+            name: "jq".to_string(),
+            version: "1.6-2.1ubuntu3".to_string(),
+            source: "apt".to_string(),
+            url: None,
+            sha256: None,
+            installed_at: Utc::now(),
+            extra_binaries: vec![],
+            auto_binary: None,
+            auto_extra_binaries: vec![],
+        });
+        lf.save(&path).unwrap();
+
+        let loaded = LockFile::load(&path).unwrap();
+        let entry = loaded.get("jq").unwrap();
+        assert_eq!(entry.version, "1.6-2.1ubuntu3");
+        assert_eq!(entry.source, "apt");
+        assert!(entry.url.is_none());
+        assert!(entry.sha256.is_none());
+    }
+
     #[test]
     fn save_is_atomic_via_rename() {
         // save() writes .lock.tmp then renames; the final file must exist and be valid TOML

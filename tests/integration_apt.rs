@@ -86,7 +86,7 @@ jq = { source = "apt", package = "jq" }
     );
 }
 
-/// `grip check` passes after a successful `grip sync`.
+/// `grip check` passes after a successful `grip sync` and `grip pin`.
 #[test]
 #[ignore]
 fn apt_check_passes_after_sync() {
@@ -102,6 +102,7 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
+    assert_success(&grip(project.path(), &["pin"]), "grip pin");
     assert_success(&grip(project.path(), &["check"]), "grip check");
 }
 
@@ -280,10 +281,10 @@ jq = { source = "apt", package = "jq" }
     );
 }
 
-/// `grip doctor` reports no issues for a clean project.
+/// `grip check` reports no issues for a clean project after pinning.
 #[test]
 #[ignore]
-fn apt_doctor_clean_project() {
+fn apt_check_clean_project() {
     if !in_container() {
         return;
     }
@@ -296,7 +297,8 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert_success(&grip(project.path(), &["doctor"]), "grip doctor");
+    assert_success(&grip(project.path(), &["pin"]), "grip pin");
+    assert_success(&grip(project.path(), &["check"]), "grip check");
 }
 
 /// Multiple binaries install concurrently without conflict.

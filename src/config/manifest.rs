@@ -468,6 +468,66 @@ mod tests {
         }
     }
 
+    /// Verify the pin→save→reload round-trip for apt entries: after pin_version() is
+    /// called and the manifest is saved, reloading it must see the version as pinned.
+    #[test]
+    fn apt_pin_version_survives_save_and_reload() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.toml");
+
+        // Write a hand-authored inline-table TOML (the form the tests use).
+        std::fs::write(
+            &path,
+            "[binaries]\njq = { source = \"apt\", package = \"jq\" }\n",
+        )
+        .unwrap();
+
+        // Load, pin, save.
+        let mut m = Manifest::load(&path).unwrap();
+        let entry = m.binaries.get_mut("jq").unwrap();
+        assert!(!entry.is_version_pinned(), "should be unpinned before pin");
+        *entry = entry.pin_version("1.6-2.1ubuntu3");
+        m.save(&path).unwrap();
+
+        // Reload and verify the pin survived.
+        let m2 = Manifest::load(&path).unwrap();
+        let entry2 = m2.binaries.get("jq").unwrap();
+        assert!(entry2.is_version_pinned(), "version pin must survive save→load");
+        if let BinaryEntry::Apt(a) = entry2 {
+            assert_eq!(a.version.as_deref(), Some("1.6-2.1ubuntu3"));
+        } else {
+            panic!("expected apt entry");
+        }
+    }
+
+    /// Same round-trip for dnf entries.
+    #[test]
+    fn dnf_pin_version_survives_save_and_reload() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grip.toml");
+
+        std::fs::write(
+            &path,
+            "[binaries]\njq = { source = \"dnf\", package = \"jq\" }\n",
+        )
+        .unwrap();
+
+        let mut m = Manifest::load(&path).unwrap();
+        let entry = m.binaries.get_mut("jq").unwrap();
+        assert!(!entry.is_version_pinned());
+        *entry = entry.pin_version("1.6-3.fc40");
+        m.save(&path).unwrap();
+
+        let m2 = Manifest::load(&path).unwrap();
+        let entry2 = m2.binaries.get("jq").unwrap();
+        assert!(entry2.is_version_pinned());
+        if let BinaryEntry::Dnf(d) = entry2 {
+            assert_eq!(d.version.as_deref(), Some("1.6-3.fc40"));
+        } else {
+            panic!("expected dnf entry");
+        }
+    }
+
     #[test]
     fn manifest_load_invalid_toml_returns_error() {
         let tmp = TempDir::new().unwrap();

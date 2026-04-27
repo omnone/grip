@@ -194,7 +194,7 @@ User runs: grip sync / grip add / etc.
 | `grip remove <name>` | Remove from manifest, lock, and `.bin/` | `--library` |
 | `grip update <name \| --all>` | Re-install and refresh one entry or all entries | `--all` |
 | `grip outdated` | Fetch latest versions and show comparison | `--tag` |
-| `grip doctor` | Detect orphaned entries, missing binaries, SHA256 drift, unpinned versions | — |
+| `grip check` | Verify installed binaries; detects orphaned entries, SHA256 drift, unpinned versions | `--tag` |
 | `grip cache info` | Show cache stats | — |
 | `grip cache clean` | Clear all cached downloads | — |
 | `grip export` | Generate install commands for Dockerfile/shell/Makefile | `--format {shell,dockerfile,makefile}` |

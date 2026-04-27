@@ -11,9 +11,9 @@ grip defends against the following scenarios:
 | Threat | Control |
 |--------|---------|
 | Compromised upstream release (tampered binary) | GPG signature verification, SHA-256 checksums |
-| Binary swapped on disk after install | `grip lock verify`, `grip doctor` SHA256 drift check |
-| Silent auto-upgrade to a compromised release | `--require-pins`, `grip doctor` unpinned entry warning |
-| Lock file hand-edited to remove hash checks | `grip doctor` missing-sha256 warning |
+| Binary swapped on disk after install | `grip lock verify`, `grip check` SHA256 drift check |
+| Silent auto-upgrade to a compromised release | `--require-pins`, `grip check` unpinned entry warning |
+| Lock file hand-edited to remove hash checks | `grip check` missing-sha256 warning |
 | Cleartext MITM on download | HTTPS enforced by reqwest; `sha256` field in `grip.toml` |
 
 ---
@@ -212,9 +212,9 @@ hint:  Pin each entry by adding a version: `grip add <name>@<version>`, ...
 
 ---
 
-## 4. `grip doctor` security checks
+## 4. `grip check` security checks
 
-`grip doctor` reports the following security-relevant issues in addition to consistency checks:
+`grip check` reports the following security-relevant issues in addition to per-entry verification:
 
 | Check | What it detects |
 |-------|----------------|
@@ -225,7 +225,8 @@ hint:  Pin each entry by adding a version: `grip add <name>@<version>`, ...
 Run after `git pull` or as part of a pre-commit hook:
 
 ```sh
-grip doctor
+grip pin    # pin any unpinned entries first
+grip check
 ```
 
 ---

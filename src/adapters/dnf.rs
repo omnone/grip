@@ -280,12 +280,7 @@ pub async fn install_dnf_library(
     };
     let pkg = pkg.trim_end_matches('-').to_string();
 
-    // Check if already installed via rpm.
-    let already_installed = Command::new("rpm")
-        .args(["-q", &entry.package])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let already_installed = rpm_provides_installed(&entry.package);
 
     if !already_installed {
         let priv_mode = check_privileges()?;
@@ -332,12 +327,7 @@ pub async fn install_dnf_library(
     }
 
     // Issue 9: verify installation and compute sha256 of installed library files.
-    let install_ok = Command::new("rpm")
-        .args(["-q", &entry.package])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !install_ok {
+    if !rpm_provides_installed(&entry.package) {
         return Err(GripError::CommandFailed(format!(
             "post-install check failed: package `{}` is not installed according to rpm",
             entry.package
@@ -554,6 +544,14 @@ fn version_from_path(path: &std::path::Path) -> Option<String> {
     None
 }
 
+fn rpm_provides_installed(package: &str) -> bool {
+    Command::new("rpm")
+        .args(["-q", "--whatprovides", package])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Query the actual installed version via rpm.
 pub fn installed_version(package: &str) -> Option<String> {
     let out = Command::new("rpm")
@@ -561,10 +559,30 @@ pub fn installed_version(package: &str) -> Option<String> {
         .output()
         .ok()?;
     if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
     }
+
+    let out = Command::new("rpm")
+        .args([
+            "-q",
+            "--whatprovides",
+            "--queryformat",
+            "%{VERSION}-%{RELEASE}",
+            package,
+        ])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
