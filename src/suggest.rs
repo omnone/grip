@@ -192,7 +192,7 @@ fn scan_shell_history() -> HashMap<String, usize> {
 
 // ── Project file scanning ─────────────────────────────────────────────────────
 
-/// Scan Makefile, scripts/, and .github/workflows/ relative to `root`.
+/// Scan Makefile, scripts/, .github/workflows/, and Dockerfiles relative to `root`.
 fn scan_project_files(root: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
 
@@ -214,6 +214,9 @@ fn scan_project_files(root: &Path) -> Vec<(String, String)> {
     if workflows.is_dir() {
         scan_ci_yaml_dir(&workflows, root, &mut out);
     }
+
+    // Issue 4: scan Dockerfiles for RUN apt-get install / RUN dnf install lines.
+    scan_dockerfiles(root, &mut out);
 
     out
 }
@@ -331,6 +334,109 @@ fn scan_ci_yaml(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
             }
         }
     }
+}
+
+// ── Dockerfile scanning ───────────────────────────────────────────────────────
+
+/// Issue 4: Walk `root` for Dockerfiles and extract package names from
+/// `RUN apt-get install` / `RUN dnf install` lines.
+fn scan_dockerfiles(root: &Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_dockerfile = fname.eq_ignore_ascii_case("dockerfile")
+            || fname.to_ascii_lowercase().starts_with("dockerfile.")
+            || ext.eq_ignore_ascii_case("dockerfile");
+        if is_dockerfile {
+            scan_dockerfile(&p, root, out);
+        }
+    }
+}
+
+fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+    let label = rel_label(path, root);
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+
+    // Join continuation lines (lines ending with \) into single logical lines.
+    let mut logical_lines: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    for line in content.lines() {
+        if line.ends_with('\\') {
+            buf.push_str(line.trim_end_matches('\\'));
+            buf.push(' ');
+        } else {
+            buf.push_str(line);
+            logical_lines.push(buf.clone());
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        logical_lines.push(buf);
+    }
+
+    for line in &logical_lines {
+        let trimmed = line.trim();
+        // Match `RUN apt-get install ...` or `RUN apt install ...`
+        if let Some(rest) = extract_pkg_manager_install(trimmed, &["apt-get install", "apt install"])
+        {
+            for pkg in parse_pkg_list(rest) {
+                out.push((pkg, format!("{label} (apt)")));
+            }
+        }
+        // Match `RUN dnf install ...`
+        if let Some(rest) =
+            extract_pkg_manager_install(trimmed, &["dnf install", "microdnf install"])
+        {
+            for pkg in parse_pkg_list(rest) {
+                out.push((pkg, format!("{label} (dnf)")));
+            }
+        }
+    }
+}
+
+/// Return the text after the first matching install command prefix inside a `RUN` line.
+fn extract_pkg_manager_install<'a>(line: &'a str, commands: &[&str]) -> Option<&'a str> {
+    // Strip leading `RUN ` (case-insensitive).
+    let after_run = if line.len() >= 4 && line[..4].eq_ignore_ascii_case("run ") {
+        line[4..].trim()
+    } else {
+        return None;
+    };
+    // Walk `&&`-separated sub-commands looking for the install command.
+    for segment in after_run.split("&&") {
+        let seg = segment.trim();
+        for cmd in commands {
+            if seg.len() >= cmd.len() && seg[..cmd.len()].eq_ignore_ascii_case(cmd) {
+                return Some(&seg[cmd.len()..]);
+            }
+        }
+    }
+    None
+}
+
+/// Parse a space-separated package list, stripping flags and version suffixes.
+fn parse_pkg_list(args: &str) -> Vec<String> {
+    args.split_whitespace()
+        .filter(|t| !t.starts_with('-'))  // drop flags like -y, --no-install-recommends
+        .filter_map(|t| {
+            // Strip version suffixes: pkg=1.2.3 → pkg, pkg-1.2.3 (dnf) → pkg
+            let name = t.splitn(2, '=').next().unwrap_or(t);
+            if is_valid_tool_name(name) {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 // ── Source-code scanning ──────────────────────────────────────────────────────
