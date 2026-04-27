@@ -211,12 +211,10 @@ pub async fn run_install(
         pb.enable_steady_tick(Duration::from_millis(80));
         pb_map.insert(name.clone(), pb.clone());
 
-        let entry = if locked {
-            if let Some(lock_entry) = lock.get(&name) {
-                entry.pin_version(lock_entry.version.as_str())
-            } else {
-                entry
-            }
+        // Issue 8: always use the locked version when one exists, so the lockfile
+        // is enforceable and not merely advisory on fresh machines.
+        let entry = if let Some(lock_entry) = lock.get(&name) {
+            entry.pin_version(lock_entry.version.as_str())
         } else {
             entry
         };
@@ -264,12 +262,9 @@ pub async fn run_install(
 
         pb_map.insert(name.clone(), pb.clone());
 
-        let entry = if locked {
-            if let Some(lock_entry) = lock.get(&name) {
-                entry.pin_version(lock_entry.version.as_str())
-            } else {
-                entry
-            }
+        // Issue 8: always use the locked version when one exists.
+        let entry = if let Some(lock_entry) = lock.get(&name) {
+            entry.pin_version(lock_entry.version.as_str())
         } else {
             entry
         };
@@ -380,7 +375,7 @@ pub async fn run_install(
                         adapter: "apt".to_string(),
                     })
                 } else {
-                    apt_adapter::install_apt_library(&name, a, pb.clone(), ui.colored).await
+                    apt_adapter::install_apt_library(&name, a, &client, pb.clone(), ui.colored).await
                 }
             }
             LibraryEntry::Dnf(d) => {
@@ -389,7 +384,7 @@ pub async fn run_install(
                         adapter: "dnf".to_string(),
                     })
                 } else {
-                    dnf_adapter::install_dnf_library(&name, d, pb.clone(), ui.colored).await
+                    dnf_adapter::install_dnf_library(&name, d, &client, pb.clone(), ui.colored).await
                 }
             }
         };
