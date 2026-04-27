@@ -202,11 +202,27 @@ static LIBRARY_EXACT: &[&str] = &[
     "lsb-release",
 ];
 
+/// Package names that look library-like but intentionally install user-facing CLIs.
+static BINARY_EXACT: &[&str] = &[
+    "libheif-examples",
+    "librsvg2-bin",
+    "libimage-exiftool-perl",
+    "libreoffice-writer",
+    "libreoffice-calc",
+    "libreoffice-impress",
+];
+
 /// Classify a package name as a [`EntryKind::Binary`] tool or [`EntryKind::Library`].
 ///
 /// Conservative on the binary side: a misclassified binary fails at install time
 /// with a clear adapter error; a misclassified library just won't get a `.bin/` symlink.
 pub fn classify(name: &str) -> EntryKind {
+    if BINARY_EXACT.contains(&name) {
+        return EntryKind::Binary;
+    }
+    if name.starts_with("fonts-") || name.starts_with("font-") || name.starts_with("ttf-") {
+        return EntryKind::Library;
+    }
     if name.starts_with("lib") {
         return EntryKind::Library;
     }
@@ -217,6 +233,91 @@ pub fn classify(name: &str) -> EntryKind {
         return EntryKind::Library;
     }
     EntryKind::Binary
+}
+
+struct PkgMeta {
+    section: String,
+    description: String,
+}
+
+fn classify_from_pkg_meta(name: &str, meta: &PkgMeta) -> EntryKind {
+    if BINARY_EXACT.contains(&name) {
+        return EntryKind::Binary;
+    }
+    let bare_section = meta
+        .section
+        .rsplit_once('/')
+        .map(|(_, s)| s)
+        .unwrap_or(&meta.section);
+    if let Some(kind) = apt_section_kind(bare_section) {
+        return kind;
+    }
+    if let Some(kind) = description_kind(&meta.description) {
+        return kind;
+    }
+    classify(name)
+}
+
+fn apt_section_kind(section: &str) -> Option<EntryKind> {
+    match section {
+        "libs" | "libdevel" | "oldlibs" | "debug" | "doc" | "introspection" | "fonts"
+        | "localization" | "translations" | "kernel" => Some(EntryKind::Library),
+        "admin" | "cli-mono" | "comm" | "editors" | "electronics" | "games" | "graphics"
+        | "hamradio" | "httpd" | "mail" | "math" | "net" | "news" | "otherosfs" | "science"
+        | "shells" | "sound" | "text" | "utils" | "vcs" | "video" | "web" | "x11" | "xfce"
+        | "gnome" | "kde" | "education" => Some(EntryKind::Binary),
+        _ => None,
+    }
+}
+
+fn description_kind(description: &str) -> Option<EntryKind> {
+    let lib_words = [
+        "library",
+        "libraries",
+        "header files",
+        "header file",
+        "development files",
+        "bindings for",
+        "binding for",
+        "module for",
+        "plugin for",
+        "extension for",
+        "runtime for",
+        "data for",
+        "font",
+        "fonts",
+    ];
+    let bin_words = [
+        "command-line",
+        "command line",
+        "command for",
+        "tool for",
+        "tool to",
+        "tools for",
+        "tools to",
+        "utility for",
+        "utility to",
+        "utilities for",
+        "application",
+        "converter",
+        "viewer",
+        "editor",
+        "manager",
+        "client",
+        "daemon",
+        "server",
+    ];
+    for w in &lib_words {
+        if description.contains(w) {
+            return Some(EntryKind::Library);
+        }
+    }
+    for w in &bin_words {
+        if description.contains(w) {
+            return Some(EntryKind::Binary);
+        }
+    }
+    None
 }
 
 // ── Verification ──────────────────────────────────────────────────────────────
@@ -247,6 +348,12 @@ static PACKAGE_TO_CMD: &[(&str, &str)] = &[
     ("kubectl", "kubectl"),
     ("helm", "helm"),
     ("k9s", "k9s"),
+    ("libheif-examples", "heif-convert"),
+    ("librsvg2-bin", "rsvg-convert"),
+    ("libimage-exiftool-perl", "exiftool"),
+    ("libreoffice-writer", "libreoffice"),
+    ("libreoffice-calc", "libreoffice"),
+    ("libreoffice-impress", "libreoffice"),
     ("flux", "flux"),
     ("terraform", "terraform"),
     ("vault", "vault"),
@@ -299,19 +406,36 @@ static PACKAGE_TO_CMD: &[(&str, &str)] = &[
     ("ag", "ag"),
 ];
 
-/// Verify packages against two local layers, returning `(verified, unverified_names)`.
-///
-/// **Layer A** — curated lookup (always runs, offline): checks the package name against
-/// [`KNOWN_TOOLS`] (via [`PACKAGE_TO_CMD`] for packages where name ≠ command). A hit
-/// confirms existence, fixes the on-PATH binary name, and surfaces the GitHub repo.
-///
-/// **Layer B** — host package manager probe (best-effort, offline-safe): runs
-/// `apt-cache show <pkg>` or `dnf info <pkg>` to confirm the package exists in the
-/// local package database. Falls back gracefully when the host package manager is absent
-/// or does not match the Dockerfile's package manager family.
-///
-/// Packages that pass neither layer are placed in `unverified_names` and must not be
-/// auto-imported.
+pub fn classify_dockerfile_packages(names: Vec<String>, manager: PkgManager) -> Vec<VerifiedPkg> {
+    let pkg_to_cmd: HashMap<&str, &str> = PACKAGE_TO_CMD.iter().map(|&(p, c)| (p, c)).collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let kind = classify(&name);
+            let cmd_name = pkg_to_cmd
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(name.as_str());
+            let binary_cmd = if kind == EntryKind::Binary && cmd_name != name.as_str() {
+                Some(cmd_name.to_string())
+            } else {
+                None
+            };
+            VerifiedPkg {
+                name,
+                version: None,
+                manager: manager.clone(),
+                kind,
+                binary_cmd,
+                github_repo: None,
+                via: "heuristic".to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Curated match, then apt/dnf probe. Remaining names are returned unverified; Dockerfile
+/// importers may call [`classify_dockerfile_packages`].
 pub fn verify_packages_sync(packages: Vec<DockerfilePackage>) -> (Vec<VerifiedPkg>, Vec<String>) {
     let known = known_tools();
     let pkg_to_cmd: HashMap<&str, &str> = PACKAGE_TO_CMD.iter().map(|&(p, c)| (p, c)).collect();
@@ -344,11 +468,12 @@ pub fn verify_packages_sync(packages: Vec<DockerfilePackage>) -> (Vec<VerifiedPk
             continue;
         }
 
-        if let Some(section) = probe_host_pkg_mgr(&pkg.name, &pkg.manager) {
-            let kind = if section.contains("lib") || section.contains("devel") {
-                EntryKind::Library
+        if let Some(meta) = probe_host_pkg_mgr(&pkg.name, &pkg.manager) {
+            let kind = classify_from_pkg_meta(&pkg.name, &meta);
+            let binary_cmd = if kind == EntryKind::Binary && cmd_name != pkg.name.as_str() {
+                Some(cmd_name.to_string())
             } else {
-                classify(&pkg.name)
+                None
             };
             let via = match pkg.manager {
                 PkgManager::Apt => "apt-cache",
@@ -360,7 +485,7 @@ pub fn verify_packages_sync(packages: Vec<DockerfilePackage>) -> (Vec<VerifiedPk
                 version: pkg.version,
                 manager: pkg.manager,
                 kind,
-                binary_cmd: None,
+                binary_cmd,
                 github_repo: None,
                 via,
             });
@@ -373,8 +498,7 @@ pub fn verify_packages_sync(packages: Vec<DockerfilePackage>) -> (Vec<VerifiedPk
     (verified, unverified)
 }
 
-/// Run `apt-cache show` or `dnf info` and return the package section if the package exists.
-fn probe_host_pkg_mgr(name: &str, manager: &PkgManager) -> Option<String> {
+fn probe_host_pkg_mgr(name: &str, manager: &PkgManager) -> Option<PkgMeta> {
     match manager {
         PkgManager::Apt => {
             if !crate::installer::which_exists("apt-cache") {
@@ -394,7 +518,16 @@ fn probe_host_pkg_mgr(name: &str, manager: &PkgManager) -> Option<String> {
                 .and_then(|l| l.strip_prefix("Section:"))
                 .map(|s| s.trim().to_lowercase())
                 .unwrap_or_else(|| "utils".to_string());
-            Some(section)
+            let description = stdout
+                .lines()
+                .find(|l| l.starts_with("Description:"))
+                .and_then(|l| l.strip_prefix("Description:"))
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_default();
+            Some(PkgMeta {
+                section,
+                description,
+            })
         }
         PkgManager::Dnf => {
             if !crate::installer::which_exists("dnf") {
@@ -404,11 +537,26 @@ fn probe_host_pkg_mgr(name: &str, manager: &PkgManager) -> Option<String> {
                 .args(["info", "--quiet", name])
                 .output()
                 .ok()?;
-            if out.status.success() && !out.stdout.is_empty() {
-                Some("utils".to_string())
-            } else {
-                None
+            if !out.status.success() || out.stdout.is_empty() {
+                return None;
             }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let section = stdout
+                .lines()
+                .find(|l| l.starts_with("Group") && l.contains(':'))
+                .and_then(|l| l.splitn(2, ':').nth(1))
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_else(|| "utils".to_string());
+            let description = stdout
+                .lines()
+                .find(|l| l.starts_with("Summary") && l.contains(':'))
+                .and_then(|l| l.splitn(2, ':').nth(1))
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_default();
+            Some(PkgMeta {
+                section,
+                description,
+            })
         }
     }
 }
@@ -1937,6 +2085,148 @@ mod tests {
     fn classify_lib_prefix() {
         assert_eq!(classify("libssl-dev"), EntryKind::Library);
         assert_eq!(classify("libpq5"), EntryKind::Library);
+    }
+
+    #[test]
+    fn classify_binary_packages_with_lib_prefix() {
+        assert_eq!(classify("libheif-examples"), EntryKind::Binary);
+        assert_eq!(classify("librsvg2-bin"), EntryKind::Binary);
+        assert_eq!(classify("libimage-exiftool-perl"), EntryKind::Binary);
+        assert_eq!(classify("libreoffice-writer"), EntryKind::Binary);
+    }
+
+    #[test]
+    fn apt_section_kind_maps_definitive_library_sections() {
+        assert_eq!(apt_section_kind("libs"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("libdevel"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("fonts"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("debug"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("doc"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("localization"), Some(EntryKind::Library));
+        assert_eq!(apt_section_kind("utils"), Some(EntryKind::Binary));
+        assert_eq!(apt_section_kind("graphics"), Some(EntryKind::Binary));
+        assert_eq!(apt_section_kind("admin"), Some(EntryKind::Binary));
+        assert_eq!(apt_section_kind("perl"), None);
+        assert_eq!(apt_section_kind("python"), None);
+        assert_eq!(apt_section_kind("misc"), None);
+    }
+
+    #[test]
+    fn description_kind_picks_library_keywords() {
+        assert_eq!(
+            description_kind("shared library for parsing XML"),
+            Some(EntryKind::Library)
+        );
+        assert_eq!(
+            description_kind("development files for libssl"),
+            Some(EntryKind::Library)
+        );
+        assert_eq!(
+            description_kind("TrueType font collection"),
+            Some(EntryKind::Library)
+        );
+    }
+
+    #[test]
+    fn description_kind_picks_binary_keywords() {
+        assert_eq!(
+            description_kind("command-line JSON processor"),
+            Some(EntryKind::Binary)
+        );
+        assert_eq!(
+            description_kind("tool for converting HEIF images"),
+            Some(EntryKind::Binary)
+        );
+        assert_eq!(
+            description_kind("SVG converter and renderer"),
+            Some(EntryKind::Binary)
+        );
+    }
+
+    #[test]
+    fn description_kind_returns_none_when_no_signal() {
+        assert_eq!(description_kind("ripgrep"), None);
+        assert_eq!(description_kind(""), None);
+    }
+
+    #[test]
+    fn classify_from_pkg_meta_binary_exact_wins_over_section() {
+        let meta = PkgMeta {
+            section: "perl".to_string(),
+            description: "perl bindings for the exiftool library".to_string(),
+        };
+        assert_eq!(
+            classify_from_pkg_meta("libimage-exiftool-perl", &meta),
+            EntryKind::Binary
+        );
+    }
+
+    #[test]
+    fn classify_from_pkg_meta_uses_section_for_clear_cases() {
+        let libs_meta = PkgMeta {
+            section: "libs".to_string(),
+            description: "".to_string(),
+        };
+        assert_eq!(
+            classify_from_pkg_meta("somelib", &libs_meta),
+            EntryKind::Library
+        );
+
+        let utils_meta = PkgMeta {
+            section: "utils".to_string(),
+            description: "".to_string(),
+        };
+        assert_eq!(
+            classify_from_pkg_meta("mytool", &utils_meta),
+            EntryKind::Binary
+        );
+    }
+
+    #[test]
+    fn classify_from_pkg_meta_strips_component_prefix() {
+        let meta = PkgMeta {
+            section: "non-free/fonts".to_string(),
+            description: "".to_string(),
+        };
+        assert_eq!(
+            classify_from_pkg_meta("ttf-mscorefonts-installer", &meta),
+            EntryKind::Library
+        );
+    }
+
+    #[test]
+    fn classify_from_pkg_meta_uses_description_for_ambiguous_section() {
+        let meta = PkgMeta {
+            section: "misc".to_string(),
+            description: "command-line tool for processing archives".to_string(),
+        };
+        assert_eq!(classify_from_pkg_meta("archiver", &meta), EntryKind::Binary);
+
+        let lib_meta = PkgMeta {
+            section: "python".to_string(),
+            description: "python library for database access".to_string(),
+        };
+        assert_eq!(
+            classify_from_pkg_meta("python3-psycopg2", &lib_meta),
+            EntryKind::Library
+        );
+    }
+
+    #[test]
+    fn classify_font_packages_as_libraries() {
+        assert_eq!(classify("fonts-liberation"), EntryKind::Library);
+        assert_eq!(classify("fonts-noto"), EntryKind::Library);
+        assert_eq!(classify("fonts-open-sans"), EntryKind::Library);
+        assert_eq!(classify("ttf-mscorefonts-installer"), EntryKind::Library);
+    }
+
+    #[test]
+    fn binary_package_overrides_map_to_real_command_names() {
+        let mappings: HashMap<&str, &str> = PACKAGE_TO_CMD.iter().copied().collect();
+        assert_eq!(mappings.get("libheif-examples"), Some(&"heif-convert"));
+        assert_eq!(mappings.get("librsvg2-bin"), Some(&"rsvg-convert"));
+        assert_eq!(mappings.get("libimage-exiftool-perl"), Some(&"exiftool"));
+        assert_eq!(mappings.get("libreoffice-writer"), Some(&"libreoffice"));
     }
 
     #[test]

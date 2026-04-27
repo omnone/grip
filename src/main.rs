@@ -449,7 +449,16 @@ async fn cmd_init(
         );
     }
 
-    let (mut verified, unverified) = verify_packages_sync(all_packages);
+    let (mut verified, unverified) = verify_packages_sync(all_packages.clone());
+
+    let heuristic = {
+        let manager = all_packages
+            .iter()
+            .find(|p| unverified.contains(&p.name))
+            .map(|p| p.manager.clone())
+            .unwrap_or(suggest::PkgManager::Apt);
+        suggest::classify_dockerfile_packages(unverified, manager)
+    };
 
     if !offline {
         let client = reqwest::Client::builder()
@@ -486,7 +495,29 @@ async fn cmd_init(
 
     if !cfg.quiet {
         let n_verified = verified.len();
-        let n_unverified = unverified.len();
+        let n_heuristic = heuristic.len();
+
+        let print_pkg_row = |pkg: &suggest::VerifiedPkg| {
+            let kind_label = match pkg.kind {
+                EntryKind::Binary => "binary ",
+                EntryKind::Library => "library",
+            };
+            let ver_display = pkg
+                .version
+                .as_deref()
+                .map(|v| format!("  {:<22}", v))
+                .unwrap_or_else(|| "  ".repeat(12));
+            let cmd_note = pkg
+                .binary_cmd
+                .as_deref()
+                .map(|c| format!("→ cmd `{c}`  "))
+                .unwrap_or_default();
+            let via_note = output::dim(color, &format!("via {}  ({})", pkg.manager_str(), pkg.via));
+            println!(
+                "    {kind_label}  {:<28} {ver_display}{cmd_note}{via_note}",
+                pkg.name
+            );
+        };
 
         if n_verified > 0 {
             println!(
@@ -494,44 +525,30 @@ async fn cmd_init(
                 output::green(color, "Verified")
             );
             for pkg in &verified {
-                let kind_label = match pkg.kind {
-                    EntryKind::Binary => "binary ",
-                    EntryKind::Library => "library",
-                };
-                let ver_display = pkg
-                    .version
-                    .as_deref()
-                    .map(|v| format!("  {:<22}", v))
-                    .unwrap_or_else(|| "  ".repeat(12));
-                let cmd_note = pkg
-                    .binary_cmd
-                    .as_deref()
-                    .map(|c| format!("→ cmd `{c}`  "))
-                    .unwrap_or_default();
-                let via_note =
-                    output::dim(color, &format!("via {}  ({})", pkg.manager_str(), pkg.via));
-                println!(
-                    "    {kind_label}  {:<28} {ver_display}{cmd_note}{via_note}",
-                    pkg.name
-                );
+                print_pkg_row(pkg);
             }
         }
 
-        if n_unverified > 0 {
+        if n_heuristic > 0 {
             println!(
-                "\n  {} — review manually ({n_unverified}):",
-                output::yellow(color, "Skipped (not verified)")
+                "\n  {} — will import ({n_heuristic}):",
+                output::yellow(
+                    color,
+                    "Classified by name (apt-cache unavailable on this host)"
+                )
             );
-            for name in &unverified {
-                let note = output::dim(color, "not found in curated list or host package manager");
-                println!("    {name:<30}  {note}");
+            for pkg in &heuristic {
+                print_pkg_row(pkg);
             }
         }
 
-        if n_verified == 0 {
+        if n_verified == 0 && n_heuristic == 0 {
             println!(
                 "\n  {}",
-                output::dim(color, "No packages could be verified — nothing to import.")
+                output::dim(
+                    color,
+                    "No packages could be classified — nothing to import."
+                )
             );
             println!(
                 "hint: {}",
@@ -541,12 +558,14 @@ async fn cmd_init(
         }
     }
 
+    verified.extend(heuristic);
+
     let do_import = if cfg.quiet || yes || !std::io::stdin().is_terminal() {
         !verified.is_empty()
     } else {
         let n = verified.len();
         eprint!(
-            "\n  Import the {} verified {} into grip.toml? [Y/n] ",
+            "\n  Import all {} {} into grip.toml? [Y/n] ",
             n,
             if n == 1 { "entry" } else { "entries" }
         );
