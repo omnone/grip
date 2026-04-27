@@ -3,11 +3,13 @@
 use async_trait::async_trait;
 use indicatif::ProgressBar;
 use reqwest::Client;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::adapters::SourceAdapter;
 use crate::bin_dir::{sha256_of_installed, symlink_binary};
+use crate::checksum::sha256_file;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::{BinaryEntry, LibAptEntry};
 use crate::error::GripError;
@@ -53,7 +55,7 @@ impl SourceAdapter for AptAdapter {
         name: &str,
         entry: &BinaryEntry,
         bin_dir: &Path,
-        _client: &Client,
+        client: &Client,
         pb: ProgressBar,
         colored: bool,
     ) -> Result<LockEntry, GripError> {
@@ -81,11 +83,43 @@ impl SourceAdapter for AptAdapter {
         if !which_pre.status.success() {
             let priv_mode = check_privileges()?;
 
+            // Issue 1: add custom apt sources before updating index.
+            if let Some(sources) = &a.apt_sources {
+                pb.set_message(format!("{name}  adding apt sources..."));
+                add_apt_sources(name, sources, priv_mode)?;
+            }
+
+            // Issue 2: import GPG keys before installing.
+            if let Some(gpg_keys) = &a.gpg_keys {
+                for url in gpg_keys {
+                    pb.set_message(format!("{name}  importing GPG key..."));
+                    import_apt_gpg_key(name, url, client, priv_mode).await?;
+                }
+            }
+
+            // Issue 2: feed debconf selections before installing.
+            if let Some(selections) = &a.debconf_selections {
+                pb.set_message(format!("{name}  setting debconf selections..."));
+                run_debconf_selections(selections, priv_mode)?;
+            }
+
             pb.set_message(format!("{name}  updating package index..."));
-            apt_get(priv_mode, &["-y", "update"])?;
+            apt_get(priv_mode, &["-y", "update"], &[], &[])?;
 
             pb.set_message(format!("{name}  installing via apt..."));
-            let ok = apt_get(priv_mode, &["install", "-y", &pkg])
+            let extra_flags: Vec<&str> = a
+                .apt_flags
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(String::as_str)
+                .collect();
+            let extra_env: Vec<(String, String)> = a
+                .apt_env
+                .as_ref()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            let ok = apt_get(priv_mode, &["install", "-y", &pkg], &extra_flags, &extra_env)
                 .map(|s| s.success())
                 .unwrap_or(false);
 
@@ -138,11 +172,62 @@ impl SourceAdapter for AptAdapter {
                 }
             }
         } else {
-            return Err(GripError::CommandFailed(format!(
-                "installed package `{}` but `{cmd_name}` is not on PATH; \
-                 set `binary = \"...\"` in grip.toml if the executable uses another name",
-                a.package
-            )));
+            // Issue 3: binary was explicitly declared but not found — fall back to
+            // auto-detection instead of failing immediately.
+            let candidates = detect_package_executables(&a.package);
+            match candidates.as_slice() {
+                [single] => {
+                    let which_cand = Command::new("which").arg(single).output()?;
+                    if which_cand.status.success() {
+                        let path_str = String::from_utf8_lossy(&which_cand.stdout)
+                            .trim()
+                            .to_string();
+                        eprintln!(
+                            "warn: binary `{cmd_name}` not found after installing `{}`; \
+                             auto-detected `{single}` — update grip.toml: binary = \"{single}\"",
+                            a.package
+                        );
+                        (std::path::PathBuf::from(path_str), Some(single.clone()))
+                    } else {
+                        return Err(GripError::CommandFailed(format!(
+                            "installed package `{}` but `{cmd_name}` is not on PATH; \
+                             set `binary = \"...\"` in grip.toml if the executable uses another name",
+                            a.package
+                        )));
+                    }
+                }
+                [] => {
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         set `binary = \"...\"` in grip.toml if the executable uses another name",
+                        a.package
+                    )));
+                }
+                many => {
+                    let first = &many[0];
+                    let list = many.join(", ");
+                    let which_cand = Command::new("which").arg(first).output()?;
+                    if which_cand.status.success() {
+                        let path_str = String::from_utf8_lossy(&which_cand.stdout)
+                            .trim()
+                            .to_string();
+                        eprintln!(
+                            "warn: binary `{cmd_name}` not found after installing `{}`; \
+                             multiple candidates: {list}; using `{first}` — \
+                             update grip.toml: binary = \"{first}\"",
+                            a.package
+                        );
+                        (std::path::PathBuf::from(path_str), Some(first.clone()))
+                    } else {
+                        return Err(GripError::CommandFailed(format!(
+                            "installed package `{}` but `{cmd_name}` is not on PATH; \
+                             multiple executables found: {list}; \
+                             set `binary = \"...\"` in grip.toml to pick one",
+                            a.package
+                        )));
+                    }
+                }
+            }
         };
         symlink_binary(&target, bin_dir, name)?;
 
@@ -206,6 +291,7 @@ impl SourceAdapter for AptAdapter {
 pub async fn install_apt_library(
     name: &str,
     entry: &LibAptEntry,
+    client: &Client,
     pb: ProgressBar,
     colored: bool,
 ) -> Result<LockEntry, GripError> {
@@ -226,11 +312,40 @@ pub async fn install_apt_library(
     if !already_installed {
         let priv_mode = check_privileges()?;
 
+        if let Some(sources) = &entry.apt_sources {
+            pb.set_message(format!("{name}  adding apt sources..."));
+            add_apt_sources(name, sources, priv_mode)?;
+        }
+
+        if let Some(gpg_keys) = &entry.gpg_keys {
+            for url in gpg_keys {
+                pb.set_message(format!("{name}  importing GPG key..."));
+                import_apt_gpg_key(name, url, client, priv_mode).await?;
+            }
+        }
+
+        if let Some(selections) = &entry.debconf_selections {
+            pb.set_message(format!("{name}  setting debconf selections..."));
+            run_debconf_selections(selections, priv_mode)?;
+        }
+
         pb.set_message(format!("{name}  updating package index..."));
-        apt_get(priv_mode, &["-y", "update"])?;
+        apt_get(priv_mode, &["-y", "update"], &[], &[])?;
 
         pb.set_message(format!("{name}  installing via apt..."));
-        let ok = apt_get(priv_mode, &["install", "-y", &pkg])
+        let extra_flags: Vec<&str> = entry
+            .apt_flags
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let extra_env: Vec<(String, String)> = entry
+            .apt_env
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let ok = apt_get(priv_mode, &["install", "-y", &pkg], &extra_flags, &extra_env)
             .map(|s| s.success())
             .unwrap_or(false);
 
@@ -238,6 +353,21 @@ pub async fn install_apt_library(
             return Err(GripError::CommandFailed(format!("apt-get install {pkg}")));
         }
     }
+
+    // Issue 9: verify installation and compute sha256 of installed library files.
+    let install_ok = Command::new("dpkg-query")
+        .args(["-W", "-f=${Status}", &entry.package])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"))
+        .unwrap_or(false);
+    if !install_ok {
+        return Err(GripError::CommandFailed(format!(
+            "post-install check failed: package `{}` is not in state 'install ok installed'",
+            entry.package
+        )));
+    }
+
+    let lib_sha256 = compute_library_sha256(&entry.package);
 
     let version = installed_version(&entry.package).unwrap_or_else(|| "unknown".to_string());
     pb.finish_with_message(format!(
@@ -249,12 +379,164 @@ pub async fn install_apt_library(
         version,
         source: "apt".to_string(),
         url: None,
-        sha256: None,
+        sha256: lib_sha256,
         installed_at: chrono::Utc::now(),
         extra_binaries: vec![],
         auto_binary: None,
         auto_extra_binaries: vec![],
     })
+}
+
+/// Issue 1: Write additional apt source entries to /etc/apt/sources.list.d/.
+fn add_apt_sources(
+    name: &str,
+    sources: &[String],
+    priv_mode: PrivilegeMode,
+) -> Result<(), GripError> {
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let list_path = format!("/etc/apt/sources.list.d/grip-{safe_name}.list");
+    let content = sources.join("\n") + "\n";
+    match priv_mode {
+        PrivilegeMode::Root => {
+            std::fs::write(&list_path, &content).map_err(GripError::Io)?;
+        }
+        PrivilegeMode::Sudo => {
+            let mut child = Command::new("sudo")
+                .args(["tee", &list_path])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(GripError::Io)?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(content.as_bytes()).map_err(GripError::Io)?;
+            }
+            child.wait().map_err(GripError::Io)?;
+        }
+    }
+    Ok(())
+}
+
+/// Issue 2: Download a GPG key and dearmor it into /usr/share/keyrings/.
+async fn import_apt_gpg_key(
+    name: &str,
+    url: &str,
+    client: &Client,
+    priv_mode: PrivilegeMode,
+) -> Result<(), GripError> {
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let keyring_path = format!("/usr/share/keyrings/grip-{safe_name}.gpg");
+
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| GripError::Other(format!("failed to download GPG key {url}: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| GripError::Other(format!("failed to read GPG key {url}: {e}")))?;
+
+    // Dearmor the key in-memory via gpg --dearmor.
+    let mut gpg_child = Command::new("gpg")
+        .args(["--dearmor"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(GripError::Io)?;
+    if let Some(mut stdin) = gpg_child.stdin.take() {
+        stdin.write_all(&bytes).map_err(GripError::Io)?;
+    }
+    let gpg_output = gpg_child
+        .wait_with_output()
+        .map_err(GripError::Io)?
+        .stdout;
+
+    // Write the dearmored key to the keyring path using privilege.
+    match priv_mode {
+        PrivilegeMode::Root => {
+            std::fs::write(&keyring_path, &gpg_output).map_err(GripError::Io)?;
+        }
+        PrivilegeMode::Sudo => {
+            let mut child = Command::new("sudo")
+                .args(["tee", &keyring_path])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(GripError::Io)?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&gpg_output).map_err(GripError::Io)?;
+            }
+            child.wait().map_err(GripError::Io)?;
+        }
+    }
+    Ok(())
+}
+
+/// Issue 2: Feed debconf selection strings to `debconf-set-selections`.
+fn run_debconf_selections(
+    selections: &[String],
+    priv_mode: PrivilegeMode,
+) -> Result<(), GripError> {
+    let content = selections.join("\n") + "\n";
+    let mut child = match priv_mode {
+        PrivilegeMode::Root => Command::new("debconf-set-selections")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(GripError::Io)?,
+        PrivilegeMode::Sudo => Command::new("sudo")
+            .arg("debconf-set-selections")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(GripError::Io)?,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(content.as_bytes()).map_err(GripError::Io)?;
+    }
+    child.wait().map_err(GripError::Io)?;
+    Ok(())
+}
+
+/// Issue 9: Compute a combined SHA-256 over the shared-library files installed by a package.
+/// Finds `.so` files via `dpkg -L`, sorts them, hashes each, then hashes all the digests
+/// together. Returns `None` if no library files are found or hashing fails.
+fn compute_library_sha256(package: &str) -> Option<String> {
+    let out = Command::new("dpkg").args(["-L", package]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let lib_dirs = &["/usr/lib/", "/lib/", "/usr/lib64/", "/lib64/"];
+    let mut so_files: Vec<std::path::PathBuf> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| lib_dirs.iter().any(|d| line.starts_with(d)) && line.contains(".so"))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect();
+    if so_files.is_empty() {
+        return None;
+    }
+    so_files.sort();
+
+    use sha2::{Digest, Sha256};
+    let mut combined = Sha256::new();
+    for path in &so_files {
+        match sha256_file(path) {
+            Ok(file_hash) => combined.update(file_hash.as_bytes()),
+            Err(_) => return None,
+        }
+    }
+    Some(format!("{:x}", combined.finalize()))
 }
 
 /// List executables installed by a package that live in a standard binary directory.
@@ -280,21 +562,40 @@ fn detect_package_executables(package: &str) -> Vec<String> {
 }
 
 /// Run `apt-get` with the given args, using sudo if required by `priv_mode`.
-/// Returns the exit status of the command.
-fn apt_get(priv_mode: PrivilegeMode, args: &[&str]) -> Result<std::process::ExitStatus, GripError> {
+/// `extra_flags` are appended after `args`; `extra_env` vars are set in addition to
+/// the default `DEBIAN_FRONTEND=noninteractive`.
+fn apt_get(
+    priv_mode: PrivilegeMode,
+    args: &[&str],
+    extra_flags: &[&str],
+    extra_env: &[(String, String)],
+) -> Result<std::process::ExitStatus, GripError> {
     let status = match priv_mode {
-        PrivilegeMode::Root => Command::new("apt-get")
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()?,
-        PrivilegeMode::Sudo => Command::new("sudo")
-            .args(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get"])
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .status()?,
+        PrivilegeMode::Root => {
+            let mut cmd = Command::new("apt-get");
+            cmd.env("DEBIAN_FRONTEND", "noninteractive");
+            for (k, v) in extra_env {
+                cmd.env(k, v);
+            }
+            cmd.args(args)
+                .args(extra_flags)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()?
+        }
+        PrivilegeMode::Sudo => {
+            let mut cmd = Command::new("sudo");
+            cmd.args(["env", "DEBIAN_FRONTEND=noninteractive"]);
+            for (k, v) in extra_env {
+                cmd.arg(format!("{k}={v}"));
+            }
+            cmd.arg("apt-get")
+                .args(args)
+                .args(extra_flags)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .status()?
+        }
     };
     Ok(status)
 }

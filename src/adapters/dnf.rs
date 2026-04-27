@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 
 use crate::adapters::SourceAdapter;
 use crate::bin_dir::{sha256_of_installed, symlink_binary};
+use crate::checksum::sha256_file;
 use crate::config::lockfile::LockEntry;
 use crate::config::manifest::{BinaryEntry, LibDnfEntry};
 use crate::error::GripError;
@@ -54,7 +55,7 @@ impl SourceAdapter for DnfAdapter {
         name: &str,
         entry: &BinaryEntry,
         bin_dir: &Path,
-        _client: &Client,
+        client: &Client,
         pb: ProgressBar,
         colored: bool,
     ) -> Result<LockEntry, GripError> {
@@ -81,11 +82,41 @@ impl SourceAdapter for DnfAdapter {
         if find_in_path(cmd_name).is_none() {
             let priv_mode = check_privileges()?;
 
+            // Issue 1: install repo RPMs before the main package.
+            if let Some(repos) = &d.dnf_repos {
+                for repo_url in repos {
+                    pb.set_message(format!("{name}  installing repo..."));
+                    let ok = dnf(priv_mode, &["install", "-y", repo_url], &[])
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if !ok {
+                        return Err(GripError::CommandFailed(format!(
+                            "dnf install repo {repo_url}"
+                        )));
+                    }
+                }
+            }
+
+            // Issue 2: import GPG keys before installing.
+            if let Some(gpg_keys) = &d.gpg_keys {
+                for url in gpg_keys {
+                    pb.set_message(format!("{name}  importing GPG key..."));
+                    import_dnf_gpg_key(url, client, priv_mode).await?;
+                }
+            }
+
             pb.set_message(format!("{name}  refreshing package metadata..."));
-            dnf(priv_mode, &["makecache", "-y"])?;
+            dnf(priv_mode, &["makecache", "-y"], &[])?;
 
             pb.set_message(format!("{name}  installing via dnf..."));
-            let ok = dnf(priv_mode, &["install", "-y", &pkg])
+            let extra_flags: Vec<&str> = d
+                .dnf_flags
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(String::as_str)
+                .collect();
+            let ok = dnf(priv_mode, &["install", "-y", &pkg], &extra_flags)
                 .map(|s| s.success())
                 .unwrap_or(false);
 
@@ -129,11 +160,60 @@ impl SourceAdapter for DnfAdapter {
                 }
             }
         } else {
-            return Err(GripError::CommandFailed(format!(
-                "installed package `{}` but `{cmd_name}` is not on PATH; \
-                 set `binary = \"...\"` in grip.toml if the executable uses another name",
-                d.package
-            )));
+            // Issue 3: binary was explicitly declared but not found — fall back to
+            // auto-detection instead of failing immediately.
+            let candidates = detect_package_executables(&d.package);
+            match candidates.as_slice() {
+                [single] => {
+                    match find_in_path(single) {
+                        Some(p) => {
+                            eprintln!(
+                                "warn: binary `{cmd_name}` not found after installing `{}`; \
+                                 auto-detected `{single}` — update grip.toml: binary = \"{single}\"",
+                                d.package
+                            );
+                            (p, Some(single.clone()))
+                        }
+                        None => {
+                            return Err(GripError::CommandFailed(format!(
+                                "installed package `{}` but `{cmd_name}` is not on PATH; \
+                                 set `binary = \"...\"` in grip.toml if the executable uses another name",
+                                d.package
+                            )));
+                        }
+                    }
+                }
+                [] => {
+                    return Err(GripError::CommandFailed(format!(
+                        "installed package `{}` but `{cmd_name}` is not on PATH; \
+                         set `binary = \"...\"` in grip.toml if the executable uses another name",
+                        d.package
+                    )));
+                }
+                many => {
+                    let first = &many[0];
+                    let list = many.join(", ");
+                    match find_in_path(first) {
+                        Some(p) => {
+                            eprintln!(
+                                "warn: binary `{cmd_name}` not found after installing `{}`; \
+                                 multiple candidates: {list}; using `{first}` — \
+                                 update grip.toml: binary = \"{first}\"",
+                                d.package
+                            );
+                            (p, Some(first.clone()))
+                        }
+                        None => {
+                            return Err(GripError::CommandFailed(format!(
+                                "installed package `{}` but `{cmd_name}` is not on PATH; \
+                                 multiple executables found: {list}; \
+                                 set `binary = \"...\"` in grip.toml to pick one",
+                                d.package
+                            )));
+                        }
+                    }
+                }
+            }
         };
         symlink_binary(&target, bin_dir, name)?;
 
@@ -189,6 +269,7 @@ impl SourceAdapter for DnfAdapter {
 pub async fn install_dnf_library(
     name: &str,
     entry: &LibDnfEntry,
+    client: &Client,
     pb: ProgressBar,
     colored: bool,
 ) -> Result<LockEntry, GripError> {
@@ -209,11 +290,39 @@ pub async fn install_dnf_library(
     if !already_installed {
         let priv_mode = check_privileges()?;
 
+        if let Some(repos) = &entry.dnf_repos {
+            for repo_url in repos {
+                pb.set_message(format!("{name}  installing repo..."));
+                let ok = dnf(priv_mode, &["install", "-y", repo_url], &[])
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !ok {
+                    return Err(GripError::CommandFailed(format!(
+                        "dnf install repo {repo_url}"
+                    )));
+                }
+            }
+        }
+
+        if let Some(gpg_keys) = &entry.gpg_keys {
+            for url in gpg_keys {
+                pb.set_message(format!("{name}  importing GPG key..."));
+                import_dnf_gpg_key(url, client, priv_mode).await?;
+            }
+        }
+
         pb.set_message(format!("{name}  refreshing package metadata..."));
-        dnf(priv_mode, &["makecache", "-y"])?;
+        dnf(priv_mode, &["makecache", "-y"], &[])?;
 
         pb.set_message(format!("{name}  installing via dnf..."));
-        let ok = dnf(priv_mode, &["install", "-y", &pkg])
+        let extra_flags: Vec<&str> = entry
+            .dnf_flags
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let ok = dnf(priv_mode, &["install", "-y", &pkg], &extra_flags)
             .map(|s| s.success())
             .unwrap_or(false);
 
@@ -221,6 +330,21 @@ pub async fn install_dnf_library(
             return Err(GripError::CommandFailed(format!("dnf install {pkg}")));
         }
     }
+
+    // Issue 9: verify installation and compute sha256 of installed library files.
+    let install_ok = Command::new("rpm")
+        .args(["-q", &entry.package])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !install_ok {
+        return Err(GripError::CommandFailed(format!(
+            "post-install check failed: package `{}` is not installed according to rpm",
+            entry.package
+        )));
+    }
+
+    let lib_sha256 = compute_library_sha256(&entry.package);
 
     let version = installed_version(&entry.package).unwrap_or_else(|| "unknown".to_string());
     pb.finish_with_message(format!(
@@ -232,7 +356,7 @@ pub async fn install_dnf_library(
         version,
         source: "dnf".to_string(),
         url: None,
-        sha256: None,
+        sha256: lib_sha256,
         installed_at: chrono::Utc::now(),
         extra_binaries: vec![],
         auto_binary: None,
@@ -240,17 +364,81 @@ pub async fn install_dnf_library(
     })
 }
 
+/// Issue 2: Import a GPG key via `rpm --import <url>`.
+async fn import_dnf_gpg_key(
+    url: &str,
+    _client: &Client,
+    priv_mode: PrivilegeMode,
+) -> Result<(), GripError> {
+    let status = match priv_mode {
+        PrivilegeMode::Root => Command::new("rpm")
+            .args(["--import", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(GripError::Io)?,
+        PrivilegeMode::Sudo => Command::new("sudo")
+            .args(["rpm", "--import", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(GripError::Io)?,
+    };
+    if !status.success() {
+        return Err(GripError::CommandFailed(format!("rpm --import {url}")));
+    }
+    Ok(())
+}
+
+/// Issue 9: Compute a combined SHA-256 over the shared-library files installed by a package.
+/// Finds `.so` files via `rpm -ql`, sorts them, hashes each, then hashes all the digests
+/// together. Returns `None` if no library files are found or hashing fails.
+fn compute_library_sha256(package: &str) -> Option<String> {
+    let out = Command::new("rpm").args(["-ql", package]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let lib_dirs = &["/usr/lib/", "/lib/", "/usr/lib64/", "/lib64/"];
+    let mut so_files: Vec<std::path::PathBuf> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| lib_dirs.iter().any(|d| line.starts_with(d)) && line.contains(".so"))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect();
+    if so_files.is_empty() {
+        return None;
+    }
+    so_files.sort();
+
+    use sha2::{Digest, Sha256};
+    let mut combined = Sha256::new();
+    for path in &so_files {
+        match sha256_file(path) {
+            Ok(file_hash) => combined.update(file_hash.as_bytes()),
+            Err(_) => return None,
+        }
+    }
+    Some(format!("{:x}", combined.finalize()))
+}
+
 /// Run `dnf` with the given args, using sudo if required by `priv_mode`.
-fn dnf(priv_mode: PrivilegeMode, args: &[&str]) -> Result<std::process::ExitStatus, GripError> {
+/// `extra_flags` are appended after `args`.
+fn dnf(
+    priv_mode: PrivilegeMode,
+    args: &[&str],
+    extra_flags: &[&str],
+) -> Result<std::process::ExitStatus, GripError> {
     let status = match priv_mode {
         PrivilegeMode::Root => Command::new("dnf")
             .args(args)
+            .args(extra_flags)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()?,
         PrivilegeMode::Sudo => Command::new("sudo")
             .arg("dnf")
             .args(args)
+            .args(extra_flags)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()?,
