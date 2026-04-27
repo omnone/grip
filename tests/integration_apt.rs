@@ -39,7 +39,7 @@ fn setup_project(toml: &str) -> TempDir {
 fn grip(dir: &Path, args: &[&str]) -> Output {
     Command::new(grip_bin())
         .arg("--quiet")
-        .arg("--root")
+        .arg("--project")
         .arg(dir)
         .args(args)
         .output()
@@ -86,7 +86,7 @@ jq = { source = "apt", package = "jq" }
     );
 }
 
-/// `grip check` passes after a successful `grip sync` and `grip pin`.
+/// `grip sync --check` passes after a successful `grip sync` and `grip lock pin`.
 #[test]
 #[ignore]
 fn apt_check_passes_after_sync() {
@@ -102,11 +102,11 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert_success(&grip(project.path(), &["pin"]), "grip pin");
-    assert_success(&grip(project.path(), &["check"]), "grip check");
+    assert_success(&grip(project.path(), &["lock", "pin"]), "grip lock pin");
+    assert_success(&grip(project.path(), &["sync", "--check"]), "grip sync --check");
 }
 
-/// `grip list` prints the installed entry after sync.
+/// `grip tree` prints the installed entry after sync.
 #[test]
 #[ignore]
 fn apt_list_shows_installed_entry() {
@@ -123,12 +123,12 @@ jq = { source = "apt", package = "jq" }
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
 
-    let out = grip(project.path(), &["list"]);
-    assert_success(&out, "grip list");
+    let out = grip(project.path(), &["tree"]);
+    assert_success(&out, "grip tree");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("jq"),
-        "expected 'jq' in grip list output, got: {stdout}"
+        "expected 'jq' in grip tree output, got: {stdout}"
     );
 }
 
@@ -180,11 +180,11 @@ jq = { source = "apt", package = "jq" }
         ".bin/jq still exists after remove"
     );
 
-    let out = grip(project.path(), &["list"]);
+    let out = grip(project.path(), &["tree"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains("jq"),
-        "jq still appears in grip list after remove"
+        "jq still appears in grip tree after remove"
     );
 }
 
@@ -281,7 +281,7 @@ jq = { source = "apt", package = "jq" }
     );
 }
 
-/// `grip check` reports no issues for a clean project after pinning.
+/// `grip sync --check` reports no issues for a clean project after pinning.
 #[test]
 #[ignore]
 fn apt_check_clean_project() {
@@ -297,8 +297,8 @@ jq = { source = "apt", package = "jq" }
     );
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert_success(&grip(project.path(), &["pin"]), "grip pin");
-    assert_success(&grip(project.path(), &["check"]), "grip check");
+    assert_success(&grip(project.path(), &["lock", "pin"]), "grip lock pin");
+    assert_success(&grip(project.path(), &["sync", "--check"]), "grip sync --check");
 }
 
 /// Multiple binaries install concurrently without conflict.

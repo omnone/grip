@@ -21,6 +21,50 @@ and no machine-specific guessing.
 
 ---
 
+## Common commands
+
+```sh
+# ── Setup ──────────────────────────────────────────────────────────────────────
+grip init                                # create grip.toml and .gitignore entry
+grip suggest                             # discover tools referenced but not declared
+grip add jq rg fd                        # add tools to grip.toml and install them
+grip add BurntSushi/ripgrep              # GitHub shorthand (owner/repo)
+grip add jq@1.7.1 --repo jqlang/jq \
+         --source github                 # pin a specific version
+grip remove jq                           # remove a tool from toml, lock, and .bin/
+
+# ── Install & run ──────────────────────────────────────────────────────────────
+grip sync                                # install all missing tools
+grip sync --locked                       # CI: fail if grip.lock would change
+grip sync --frozen                       # install exactly what is in grip.lock
+grip sync --check                        # verify .bin/ matches lock; no install
+grip run jq '.name' package.json         # run a tool with .bin/ on PATH
+eval "$(grip env)"                       # add .bin/ to current shell session
+
+# ── Lock management ────────────────────────────────────────────────────────────
+grip tree                                # list installed tools with versions
+grip lock                                # resolve versions → write grip.lock
+grip lock --check                        # assert lock is up to date (CI)
+grip lock --upgrade                      # re-resolve all to latest → update lock
+grip lock --upgrade-package kubectl      # re-resolve one tool → update lock
+grip lock --upgrade --dry-run            # preview what would change
+grip lock pin                            # write installed versions into grip.toml
+grip lock verify                         # re-hash .bin/ vs lock (tamper check)
+
+# ── Export & security ──────────────────────────────────────────────────────────
+grip export --format dockerfile          # Dockerfile RUN lines from grip.lock
+grip export --format cyclonedx -o s.json # CycloneDX SBOM to file
+grip audit                               # CVE scan via OSV database
+
+# ── CI (in order) ──────────────────────────────────────────────────────────────
+grip suggest --check                     # fail if any tool is undeclared
+grip lock --check                        # fail if lockfile is stale
+grip sync --locked --require-pins        # install; fail if lock or pins would change
+grip lock verify                         # detect tampering post-install
+```
+
+---
+
 ## What grip is for
 
 Use grip when your project depends on tools that usually live outside your
@@ -101,7 +145,7 @@ Added 'jq' to grip.toml
   1 installed  (1.2s)
 
 # 4. See what is installed
-$ grip list
+$ grip tree
 
   Installed binaries (from grip.lock)
 
@@ -194,9 +238,13 @@ See [EXAMPLES.md](docs/EXAMPLES.md) for the full walkthrough including multi-Doc
 
 ### Run a tool without changing your shell PATH
 
+Use `grip run` for one-off invocations. Pass `--` to avoid ambiguity between grip flags
+and tool flags:
+
 ```sh
 $ grip run jq --version
 jq-1.7.1
+$ grip run -- fd --hidden .
 ```
 
 ### Add your project's `.bin/` to PATH for the current shell session
@@ -209,10 +257,12 @@ jq-1.7.1
 
 ### Check that what is installed matches the lockfile
 
-`grip check` verifies installed binaries against the lockfile and also reports consistency issues — orphaned lock entries, unpinned versions, and missing SHA-256 hashes.
+`grip sync --check` verifies installed binaries against the lockfile and reports consistency
+issues — orphaned lock entries, unpinned versions, and missing SHA-256 hashes — without
+installing or modifying anything.
 
 ```sh
-$ grip check
+$ grip sync --check
 
   Checking installed binaries…
 
@@ -221,10 +271,11 @@ $ grip check
   All 1 checks passed
 ```
 
-If any consistency issues are found, they appear in a separate section and `grip check` exits non-zero:
+If any consistency issues are found, they appear in a separate section and the command
+exits non-zero:
 
 ```sh
-$ grip check
+$ grip sync --check
 
   Checking installed binaries…
 
@@ -232,7 +283,7 @@ $ grip check
 
   Consistency issues
 
-  ⚠  binary 'kubectl' (github) has no version pin — run `grip pin` to fix
+  ⚠  binary 'kubectl' (github) has no version pin — run `grip lock pin` to fix
 
   1 check passed, 1 consistency issue
 ```
@@ -240,16 +291,17 @@ $ grip check
 ### Pin unpinned tools to their installed versions
 
 ```sh
-$ grip pin              # write exact versions from grip.lock into grip.toml
-$ grip pin --dry-run    # preview what would be pinned without modifying grip.toml
+$ grip lock pin              # write exact versions from grip.lock into grip.toml
+$ grip lock pin --dry-run    # preview what would be pinned without modifying grip.toml
 ```
 
-Entries that are not yet installed (not in `grip.lock`) are skipped with a warning — run `grip sync` first, then re-run `grip pin`.
+Entries not yet in `grip.lock` are skipped with a warning — run `grip sync` first, then
+re-run `grip lock pin`.
 
-### See if newer versions are available
+### See what has newer versions available
 
 ```sh
-$ grip outdated
+$ grip lock --upgrade --dry-run
 
   BINARY    INSTALLED   LATEST    STATUS
   ───────────────────────────────────────
@@ -258,7 +310,8 @@ $ grip outdated
   terraform 1.6.6       1.8.1     outdated
 ```
 
-Run `grip add kubectl@1.31.0` to update, then `git commit grip.toml grip.lock`.
+Run `grip lock --upgrade-package kubectl` then `grip sync` to upgrade a single tool, or
+`grip lock --upgrade` then `grip sync` to upgrade everything.
 
 ### Remove a tool
 
@@ -313,12 +366,18 @@ You never edit `grip.lock` by hand — grip maintains it automatically.
 ### Recommended setup
 
 ```sh
-grip suggest --check                # fail if any tool is used but not declared
-grip sync --locked --require-pins   # fails if lock would change, or any version floats
-grip lock verify                    # re-hashes every .bin/ binary; catches tampering
+grip suggest --check                        # fail if any tool is used but not declared
+grip lock --check                           # fail if grip.lock is not up-to-date
+grip sync --locked --require-pins           # install; fail if lock would change or any version floats
+grip lock verify                            # re-hash every .bin/ binary; catch tampering
 ```
 
-`grip suggest --check` fails the job if any tool referenced in scripts or CI YAML isn't declared in `grip.toml`. `grip sync --locked` ensures the lockfile is respected exactly — the job fails if `grip.lock` would need to change. `grip lock verify` re-hashes every binary in `.bin/` against the recorded SHA-256 without re-downloading anything, catching tampering introduced between sync and execution.
+`grip suggest --check` fails the job if any tool referenced in scripts or CI YAML is not
+declared in `grip.toml`. `grip lock --check` asserts the lockfile is current without
+modifying it. `grip sync --locked` enforces the lockfile exactly — the job fails if
+`grip.lock` would need to change. `grip lock verify` re-hashes every binary in `.bin/`
+against the recorded SHA-256 without re-downloading, catching tampering between sync and
+execution.
 
 For generating lock-accurate Dockerfile instructions, see [Quickstart](#quickstart).
 
@@ -335,11 +394,13 @@ For generating lock-accurate Dockerfile instructions, see [Quickstart](#quicksta
 
 ### SBOM generation
 
-`grip sbom` exports a Software Bill of Materials directly from `grip.lock` — no network access needed:
+`grip export` can emit a Software Bill of Materials directly from `grip.lock` — no network
+access needed:
 
 ```sh
-$ grip sbom --format cyclonedx > sbom.json
-$ grip sbom --format spdx > sbom.spdx
+$ grip export --format cyclonedx > sbom.json
+$ grip export --format spdx > sbom.spdx.json
+$ grip export --format cyclonedx -o sbom.json   # write to file
 ```
 
 CycloneDX 1.5 and SPDX 2.3 are both supported.
@@ -355,12 +416,14 @@ $ grip audit
 
   jq        1.7.1   ✓  no known vulnerabilities
   kubectl   1.30.2  ✓  no known vulnerabilities
-  terraform 1.6.6   ✗  1 vulnerability  (run grip audit --json for details)
+  terraform 1.6.6   ✗  1 vulnerability
 
   1 vulnerability found — exit code 1
 ```
 
-Add `grip audit` to CI to block deploys when new CVEs are published against your declared tools.
+Add `grip audit` to CI to block deploys when new CVEs are published against your declared
+tools. Run `grip lock --upgrade-package terraform` then `grip sync` to upgrade a vulnerable
+tool.
 
 ---
 
@@ -408,7 +471,7 @@ grip supports layered supply chain protections:
 - **GPG signature verification** — add `gpg_fingerprint` to any `github` or `url` entry to verify the release asset signature before installing.
 - **Post-install tamper detection** — `grip lock verify` re-hashes every `.bin/` binary against `grip.lock` without re-downloading anything.
 - **Version pin enforcement** — `grip sync --require-pins` fails before touching the network if any entry floats to "latest".
-- **Health checks** — `grip check` detects orphaned lock entries, missing SHA-256 hashes, and unpinned entries in addition to verifying installed binaries.
+- **Health checks** — `grip sync --check` detects orphaned lock entries, missing SHA-256 hashes, and unpinned entries in addition to verifying installed binaries.
 
 See [SECURITY.md](docs/SECURITY.md) for the full guide.
 

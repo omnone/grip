@@ -12,7 +12,7 @@ binaries-manager/
 │   ├── main.rs                    # Entry point and all command implementations
 │   ├── cli.rs                     # Clap CLI definitions
 │   ├── installer.rs               # Core install orchestration
-│   ├── checker.rs                 # Verification logic (grip check)
+│   ├── checker.rs                 # Verification logic (grip sync --check)
 │   ├── lock_verify.rs             # Lock file tamper detection (grip lock verify)
 │   ├── gpg.rs                     # GPG signature and signed-checksums verification
 │   ├── error.rs                   # GripError enum and formatting
@@ -189,23 +189,25 @@ User runs: grip sync / grip add / etc.
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `grip init` | Create `grip.toml` template, add `.bin/` to `.gitignore` | — |
-| `grip add <name>` | Add binary/library to manifest and install immediately | `--source`, `--version`, `--repo`, `--url`, `--package`, `--binary`, `--library`, `--cmd`, `--allow-shell`, `--gpg-fingerprint`, `--sig-asset-pattern`, `--checksums-asset-pattern`, `--sig-url`, `--signed-checksums-url`, `--checksums-sig-url` |
-| `grip sync` | Install all missing binaries concurrently | `--locked`, `--verify`, `--tag`, `--require-pins`, `--yes` |
-| `grip check` | Verify `.bin/` matches `grip.lock` | `--tag` |
+| `grip init [PATH]` | Create `grip.toml` template, add `.bin/` to `.gitignore` | `--bare`, `--from`, `--yes`, `--offline` |
+| `grip add <name>...` | Add one or more tools to manifest and install immediately | `--source`, `--version`, `--repo`, `--url`, `--package`, `--binary`, `--library`, `--no-sync`, `--frozen`, `--gpg-fingerprint` |
+| `grip remove <name>...` | Remove from manifest, lock, and `.bin/` | `--no-sync`, `--frozen` |
+| `grip lock` | Resolve versions from `grip.toml` and write `grip.lock` (no install) | `--check`, `--dry-run`, `--upgrade`, `--upgrade-package`, `--tag` |
 | `grip lock verify` | Re-hash `.bin/` against `grip.lock`; tamper detection for CI | — |
-| `grip list` | Print lock file entries; `--all` also shows uninstalled declarations | `--all` |
-| `grip remove <name>` | Remove from manifest, lock, and `.bin/` | `--library` |
-| `grip update <name \| --all>` | Re-install and refresh one entry or all entries | `--all` |
-| `grip outdated` | Fetch latest versions and show comparison | `--tag` |
-| `grip check` | Verify installed binaries; detects orphaned entries, SHA256 drift, unpinned versions | `--tag` |
-| `grip cache info` | Show cache stats | — |
+| `grip lock pin` | Write installed versions from `grip.lock` back into `grip.toml` | `--dry-run` |
+| `grip sync` | Install all missing binaries concurrently | `--locked`, `--frozen`, `--check`, `--dry-run`, `--require-pins` |
+| `grip run [--] <cmd>` | Execute a command with `.bin/` prepended to PATH; auto-syncs | `--no-sync`, `--locked`, `--frozen` |
+| `grip tree` | List installed entries with versions, sources, and timestamps | — |
+| `grip cache dir` | Print the cache directory path | — |
+| `grip cache size` | Show cache disk usage | — |
 | `grip cache clean` | Clear all cached downloads | — |
-| `grip export` | Generate install commands for Dockerfile/shell/Makefile | `--format {shell,dockerfile,makefile}` |
-| `grip run <cmd>` | Execute a command with `.bin/` prepended to PATH | — |
+| `grip cache prune` | Remove only stale/unused cache entries | — |
+| `grip export` | Generate Dockerfile/shell/Makefile install commands or SBOM | `--format`, `-o/--output` |
+| `grip audit` | Cross-reference installed tools against the OSV vulnerability database | — |
+| `grip suggest` | Discover tool references in the project not declared in `grip.toml` | `--check` |
 | `grip env` | Output shell code to add `.bin/` to PATH (for `eval`) | `--shell {bash,zsh,fish,sh}` |
 
-**Global flags** (all commands): `-q/--quiet`, `-v/--verbose`, `--color {auto,always,never}`, `--root <DIR>`
+**Global flags** (all commands): `-q/--quiet`, `-v/--verbose`, `--color {auto,always,never}`, `--project <DIR>`, `--directory <DIR>`, `--offline`, `--no-cache`, `--cache-dir <DIR>`, `--no-progress`
 
 ---
 
@@ -331,12 +333,12 @@ Three layered controls are implemented in `src/`:
 
 1. **GPG signature verification** (`gpg.rs`) — two modes: direct binary signature (Mode 1) and signed checksums file (Mode 2, used by HashiCorp, Go, jq, etc.). Shared by `adapters/github.rs` and `adapters/url.rs`. Both modes use `verify_gpg_signature_with_cmd` / `verify_signed_checksums_with_cmd` internally, which accept a `gpg_cmd` parameter so tests can pass a non-existent binary name instead of mutating `PATH`.
 
-2. **`grip lock verify`** (`lock_verify.rs`) — reads `grip.lock` directly (no manifest, no network), re-hashes every `.bin/` binary, and reports mismatches. Separates "is my setup complete?" (`grip check`) from "was anything tampered with after install?" (`grip lock verify`).
+2. **`grip lock verify`** (`lock_verify.rs`) — reads `grip.lock` directly (no manifest, no network), re-hashes every `.bin/` binary, and reports mismatches. Separates "is my setup complete?" (`grip sync --check`) from "was anything tampered with after install?" (`grip lock verify`).
 
 3. **`--require-pins`** (`installer.rs`) — checked at the top of `run_install` before any network call. Uses `BinaryEntry::is_version_pinned()` from `config/manifest.rs`. `url` entries are always considered pinned (the URL is the artifact identifier); all other sources require an explicit `version` field.
 
 ### Real apt/dnf Version Resolution
-`grip outdated` queries `apt-cache policy` (APT) and `dnf info` (DNF) to retrieve the actual repository candidate version rather than reporting a static `"latest"` string. Both fall back gracefully when the package manager is unavailable.
+`grip lock --upgrade --dry-run` queries `apt-cache policy` (APT) and `dnf info` (DNF) to retrieve the actual repository candidate version rather than reporting a static `"latest"` string. Both fall back gracefully when the package manager is unavailable.
 
 ### Cache Strategy
 Downloads are keyed by SHA-256 of the URL string. Configurable via `$GRIP_CACHE_DIR`; setting it to empty disables caching entirely.
@@ -367,8 +369,12 @@ Each suite runs inside a dedicated Docker container to ensure clean, reproducibl
 # Initialize a project
 grip init
 
-# Add a tool from GitHub (auto-installs)
+# Discover unmanaged tool references
+grip suggest
+
+# Add tools from GitHub (auto-installs; owner/repo implies --source github)
 grip add BurntSushi/ripgrep
+grip add jq rg fd           # multiple tools in one shot
 
 # Add a system package
 grip add ripgrep --source apt
@@ -377,19 +383,29 @@ grip add ripgrep --source apt
 grip sync
 
 # CI mode: fail if lock would change
-grip sync --locked
+grip sync --locked --require-pins
 
-# Verify installed binaries match the lock
-grip check
+# Verify installed binaries match the lock (no install)
+grip sync --check
+
+# Detect post-install tampering
+grip lock verify
+
+# List installed tools
+grip tree
+
+# Resolve versions → write grip.lock (no install)
+grip lock
+grip lock --check            # assert lockfile is current
+grip lock --upgrade          # upgrade all to latest
+grip lock --upgrade-package rg   # upgrade one tool
+grip lock pin                # write installed versions into grip.toml
 
 # Use an installed binary
 eval "$(grip env)"
 rg --version
 # OR
 grip run rg --version
-
-# Check for updates
-grip outdated
 
 # Generate Dockerfile install commands
 grip export --format dockerfile

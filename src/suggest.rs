@@ -584,7 +584,6 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize,
         }
     };
 
-    // Tools already declared in grip.toml — skip them.
     let manifest_path = project_root.join("grip.toml");
     let already_declared: HashSet<String> = if manifest_path.exists() {
         let m = Manifest::load(&manifest_path)?;
@@ -600,10 +599,8 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize,
     let builtins = system_builtins();
     let known = known_tools();
 
-    // name → list of (source_label, count)
     let mut raw: HashMap<String, Vec<(String, usize)>> = HashMap::new();
 
-    // 1. Shell history
     if opts.history {
         for (name, count) in scan_shell_history() {
             raw.entry(name)
@@ -612,17 +609,14 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize,
         }
     }
 
-    // 2. Project files: Makefile, scripts/, .github/workflows/
     for (name, label) in scan_project_files(&project_root) {
         accumulate(&mut raw, name, label);
     }
 
-    // 3. Source-code paths provided by the user
     for (name, label) in scan_source_code(&opts.scan_paths) {
         accumulate(&mut raw, name, label);
     }
 
-    // Build sorted candidates, dropping builtins and already-declared tools.
     let mut candidates: BTreeMap<
         String,
         (Option<(&'static str, &'static str)>, Vec<(String, usize)>),
@@ -650,8 +644,6 @@ pub fn run_suggest(root: Option<PathBuf>, opts: SuggestOptions) -> Result<usize,
 
     Ok(n)
 }
-
-// ── Output ────────────────────────────────────────────────────────────────────
 
 fn print_suggestions(
     candidates: &BTreeMap<String, (Option<(&'static str, &'static str)>, Vec<(String, usize)>)>,
@@ -771,7 +763,6 @@ fn scan_project_files(root: &Path) -> Vec<(String, String)> {
         scan_ci_yaml_dir(&workflows, root, &mut out);
     }
 
-    // Issue 4: scan Dockerfiles for RUN apt-get install / RUN dnf install lines.
     scan_dockerfiles(root, &mut out);
 
     out
@@ -793,7 +784,6 @@ fn scan_makefile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         if !line.starts_with('\t') {
             continue;
         }
-        // Strip make-specific @ (silent) and - (ignore-error) prefixes.
         let cmd = line.trim().trim_start_matches(|c| c == '@' || c == '-');
         if let Some(name) = extract_command_name(cmd) {
             out.push((name, label.clone()));
@@ -922,7 +912,6 @@ fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         return;
     };
 
-    // Join continuation lines (lines ending with \) into single logical lines.
     let mut logical_lines: Vec<String> = Vec::new();
     let mut buf = String::new();
     for line in content.lines() {
@@ -941,7 +930,6 @@ fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
 
     for line in &logical_lines {
         let trimmed = line.trim();
-        // Match `RUN apt-get install ...` or `RUN apt install ...`
         if let Some(rest) =
             extract_pkg_manager_install(trimmed, &["apt-get install", "apt install"])
         {
@@ -949,7 +937,6 @@ fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
                 out.push((pkg, format!("{label} (apt)")));
             }
         }
-        // Match `RUN dnf install ...`
         if let Some(rest) =
             extract_pkg_manager_install(trimmed, &["dnf install", "microdnf install"])
         {
@@ -962,13 +949,11 @@ fn scan_dockerfile(path: &Path, root: &Path, out: &mut Vec<(String, String)>) {
 
 /// Return the text after the first matching install command prefix inside a `RUN` line.
 fn extract_pkg_manager_install<'a>(line: &'a str, commands: &[&str]) -> Option<&'a str> {
-    // Strip leading `RUN ` (case-insensitive).
     let after_run = if line.len() >= 4 && line[..4].eq_ignore_ascii_case("run ") {
         line[4..].trim()
     } else {
         return None;
     };
-    // Walk `&&`-separated sub-commands looking for the install command.
     for segment in after_run.split("&&") {
         let seg = strip_leading_shell_assignments(segment.trim());
         for cmd in commands {
@@ -1011,7 +996,6 @@ fn parse_pkg_list(args: &str) -> Vec<String> {
     args.split_whitespace()
         .filter(|t| !t.starts_with('-')) // drop flags like -y, --no-install-recommends
         .filter_map(|t| {
-            // Strip version suffixes: pkg=1.2.3 → pkg, pkg-1.2.3 (dnf) → pkg
             let name = t.splitn(2, '=').next().unwrap_or(t);
             if is_valid_tool_name(name) {
                 Some(name.to_string())
@@ -1022,15 +1006,11 @@ fn parse_pkg_list(args: &str) -> Vec<String> {
         .collect()
 }
 
-// ── Source-code scanning ──────────────────────────────────────────────────────
-
 /// Scan source files under the given paths for subprocess / exec calls and
 /// binary path literals.
 fn scan_source_code(paths: &[PathBuf]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for p in paths {
-        // When a single file is passed, use its parent as the base so the
-        // label shows the filename rather than an empty string.
         let base = if p.is_file() {
             p.parent()
                 .map(|parent| parent.to_path_buf())
@@ -1053,7 +1033,6 @@ fn walk_source(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         for entry in entries.flatten() {
             let child = entry.path();
             let fname = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Skip hidden dirs and known build artifact / dependency directories.
             if fname.starts_with('.')
                 || matches!(
                     fname,
@@ -1073,20 +1052,6 @@ fn walk_source(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
-// ── Pluggable language scanner registry ──────────────────────────────────────
-//
-// To add support for a new language, append a `LanguageScanner` entry to
-// `LANGUAGE_SCANNERS` below.  No other code needs to change.
-//
-// Each scanner describes:
-//   • which file extensions it handles
-//   • which string patterns to search for
-//
-// The engine matches each pattern, reads until the next `"`, and takes the
-// first whitespace-delimited token as the candidate tool name.  This covers
-// both list-form calls (subprocess.run(["tool", ...]) → "tool") and
-// string-form calls (os.system("tool arg") → "tool").
-
 /// Describes how to detect binary invocations in a particular language.
 struct LanguageScanner {
     extensions: &'static [&'static str],
@@ -1095,37 +1060,30 @@ struct LanguageScanner {
 
 /// Registry of all supported language scanners.
 static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
-    // ── Python ────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["py"],
         patterns: &[
-            // subprocess — list form
             "subprocess.run([\"",
             "subprocess.call([\"",
             "subprocess.check_call([\"",
             "subprocess.check_output([\"",
             "subprocess.Popen([\"",
-            "Popen([\"", // direct import
-            // subprocess — string form (first token taken)
+            "Popen([\"",
             "subprocess.getoutput(\"",
             "subprocess.getstatusoutput(\"",
-            // os module
             "os.system(\"",
             "os.popen(\"",
             "os.execvp(\"",
             "os.execv(\"",
             "os.execl(\"",
             "os.execlp(\"",
-            // shutil
             "shutil.which(\"",
         ],
     },
-    // ── Rust ──────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["rs"],
         patterns: &["Command::new(\"", "command::new(\""],
     },
-    // ── JavaScript / TypeScript ───────────────────────────────────────────
     LanguageScanner {
         extensions: &["js", "ts", "mjs", "cjs", "jsx", "tsx"],
         patterns: &[
@@ -1138,12 +1096,10 @@ static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
             "execa(\"",
         ],
     },
-    // ── Go ────────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["go"],
         patterns: &["exec.Command(\"", "exec.LookPath(\""],
     },
-    // ── Ruby ──────────────────────────────────────────────────────────────
     LanguageScanner {
         extensions: &["rb"],
         patterns: &[
@@ -1158,10 +1114,8 @@ static LANGUAGE_SCANNERS: &[LanguageScanner] = &[
 ];
 
 fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
-    // Compute a stable, non-empty label relative to `base`.
     let rel = path.strip_prefix(base).unwrap_or(path);
     let label: String = if rel.as_os_str().is_empty() {
-        // path == base (single file passed directly)
         path.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string())
@@ -1177,7 +1131,6 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         ext,
         "rs" | "py" | "js" | "ts" | "mjs" | "cjs" | "jsx" | "tsx" | "go" | "rb"
     );
-    // Files where we only run the binary-path scanner (no language API patterns).
     let is_paths_only = matches!(
         ext,
         "yml" | "yaml" | "toml" | "json" | "mk" | "dockerfile" | "conf" | "cfg" | "ini"
@@ -1195,17 +1148,8 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         return;
     };
 
-    // Per-file dedup: avoid double-counting the same tool from overlapping
-    // patterns (e.g. `subprocess.Popen` matching both `subprocess.Popen(["` and
-    // `Popen(["`).
     let mut seen: HashSet<String> = HashSet::new();
 
-    // ── Shell scripts scanned via --path: binary-path references only ────────
-    // Line-by-line command extraction is intentionally skipped here — it
-    // produces too many false positives from shell keywords (if/fi/case/done),
-    // user-defined function calls, and build-system commands.  Only absolute
-    // path literals like /usr/local/bin/ffmpeg are meaningful signals when the
-    // user points us at a shell script as source code.
     if is_shell {
         for name in scan_binary_paths(&content) {
             let name = name.to_string();
@@ -1216,7 +1160,6 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         return;
     }
 
-    // ── Language-specific subprocess / exec patterns ──────────────────────────
     if is_lang {
         let scanner = LANGUAGE_SCANNERS
             .iter()
@@ -1234,10 +1177,7 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
                 if start < content.len() {
                     if let Some(end) = content[start..].find('"') {
                         let raw = &content[start..start + end];
-                        // Take only the first whitespace-delimited token so that
-                        // os.system("kubectl get pods") → "kubectl" (not the full string).
                         let first = raw.split_whitespace().next().unwrap_or(raw);
-                        // Strip any path prefix: /usr/bin/kubectl → kubectl.
                         let name = first.rsplit('/').next().unwrap_or(first);
                         if is_valid_tool_name(name) && seen.insert(name.to_string()) {
                             out.push((name.to_string(), label.clone()));
@@ -1249,10 +1189,6 @@ fn scan_source_file(path: &Path, base: &Path, out: &mut Vec<(String, String)>) {
         }
     }
 
-    // ── Universal binary-path scan ────────────────────────────────────────────
-    // Runs for all supported file types (language files, shell scripts already
-    // returned above, and paths-only files like Dockerfile / YAML).
-    // Catches literals like /usr/local/bin/kubectl → "kubectl".
     for name in scan_binary_paths(&content) {
         let name = name.to_string();
         if seen.insert(name.clone()) {
@@ -1267,7 +1203,7 @@ fn scan_binary_paths(content: &str) -> Vec<&str> {
     let mut names = Vec::new();
     let mut pos = 0;
     while let Some(found) = content[pos..].find("/bin/") {
-        let name_start = pos + found + 5; // skip "/bin/"
+        let name_start = pos + found + 5;
         if name_start < content.len() {
             let rest = &content[name_start..];
             let end = rest
@@ -1282,8 +1218,6 @@ fn scan_binary_paths(content: &str) -> Vec<&str> {
     }
     names
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Aggregate (name, label) findings into the raw map.
 fn accumulate(raw: &mut HashMap<String, Vec<(String, usize)>>, name: String, label: String) {
@@ -1302,28 +1236,23 @@ fn extract_command_name(line: &str) -> Option<String> {
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    // zsh extended-history format: ": 1234567890:0;actual command"
     let line = if line.starts_with(": ") && line.contains(';') {
         line.splitn(2, ';').nth(1)?.trim()
     } else {
         line
     };
-    // fish history format: "- cmd: actual command"
     let line = if let Some(rest) = line.strip_prefix("- cmd:") {
         rest.trim()
     } else {
         line
     };
-    // fish "when:" metadata lines
     if line.starts_with("when:") {
         return None;
     }
 
     let token = line.split_whitespace().next()?;
-    // Strip any path prefix so "./bin/jq" → "jq"
     let token = token.rsplit('/').next().unwrap_or(token);
 
-    // Skip shell metacharacters, assignments, redirections, etc.
     if token.starts_with('$')
         || token.starts_with('-')
         || token.starts_with('!')
@@ -1337,7 +1266,6 @@ fn extract_command_name(line: &str) -> Option<String> {
         || token.contains('>')
         || token.contains('<')
         || token.ends_with(':')
-    // YAML keys
     {
         return None;
     }
@@ -1357,11 +1285,8 @@ fn is_valid_tool_name(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-// ── Curated knowledge base ────────────────────────────────────────────────────
-
 /// Known tools: (command_name, github_repo, short_description)
 static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
-    // JSON / data
     ("jq", "jqlang/jq", "JSON processor"),
     ("yq", "mikefarah/yq", "YAML/JSON/TOML processor"),
     ("gron", "tomnomnom/gron", "Flatten JSON to greppable lines"),
@@ -1370,12 +1295,10 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
         "TomWright/dasel",
         "Query/update JSON, YAML, TOML, CSV",
     ),
-    // Search
     ("rg", "BurntSushi/ripgrep", "Fast grep alternative"),
     ("fd", "sharkdp/fd", "Fast find alternative"),
     ("fzf", "junegunn/fzf", "Fuzzy finder"),
     ("ag", "ggreer/the_silver_searcher", "Fast code search"),
-    // File tools
     ("bat", "sharkdp/bat", "cat with syntax highlighting"),
     ("delta", "dandavison/delta", "Better git diff"),
     ("difft", "Wilfred/difftastic", "Structural diff"),
@@ -1386,18 +1309,15 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
     ("dust", "bootandy/dust", "Intuitive du"),
     ("duf", "muesli/duf", "Better df"),
     ("gdu", "dundee/gdu", "Disk usage analyser"),
-    // HTTP / network
     ("xh", "ducaale/xh", "Friendly HTTP client"),
     (
         "hurl",
         "Orange-OpenSource/hurl",
         "HTTP requests from text files",
     ),
-    // System / process
     ("procs", "dalance/procs", "Modern ps"),
     ("btm", "ClementTsang/bottom", "System resource monitor"),
     ("bandwhich", "imsnif/bandwhich", "Network usage by process"),
-    // Git
     ("lazygit", "jesseduffield/lazygit", "Terminal UI for git"),
     ("gitui", "extrawurst/gitui", "Fast terminal git UI"),
     ("gh", "cli/cli", "GitHub CLI"),
@@ -1412,7 +1332,6 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
         "trufflesecurity/trufflehog",
         "Find leaked credentials",
     ),
-    // Dev tooling
     ("just", "casey/just", "Command runner (make alternative)"),
     (
         "hyperfine",
@@ -1423,7 +1342,6 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
     ("shellcheck", "koalaman/shellcheck", "Shell script linter"),
     ("shfmt", "mvdan/sh", "Shell script formatter"),
     ("hadolint", "hadolint/hadolint", "Dockerfile linter"),
-    // Kubernetes / cloud
     ("k9s", "derailed/k9s", "Kubernetes TUI"),
     ("kubectl", "kubernetes/kubectl", "Kubernetes CLI"),
     ("helm", "helm/helm", "Kubernetes package manager"),
@@ -1435,13 +1353,11 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
     ("flux", "fluxcd/flux2", "GitOps for Kubernetes"),
     ("argocd", "argoproj/argo-cd", "GitOps CD tool"),
     ("eksctl", "eksctl/eksctl", "Amazon EKS CLI"),
-    // Infrastructure
     ("terraform", "hashicorp/terraform", "Infrastructure as code"),
     ("vault", "hashicorp/vault", "Secrets management"),
     ("packer", "hashicorp/packer", "Machine image builder"),
     ("pulumi", "pulumi/pulumi", "Infrastructure as code"),
     ("act", "nektos/act", "Run GitHub Actions locally"),
-    // Security
     ("cosign", "sigstore/cosign", "Container image signing"),
     ("syft", "anchore/syft", "SBOM generator"),
     ("grype", "anchore/grype", "Vulnerability scanner"),
@@ -1453,7 +1369,6 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
         "google/osv-scanner",
         "Open-source vulnerability scanner",
     ),
-    // Code quality
     ("golangci-lint", "golangci/golangci-lint", "Go meta-linter"),
     ("tflint", "terraform-linters/tflint", "Terraform linter"),
     ("semgrep", "semgrep/semgrep", "Code analysis tool"),
@@ -1463,10 +1378,8 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
         "open-policy-agent/conftest",
         "Policy testing for config files",
     ),
-    // gRPC / protobuf
     ("grpcurl", "fullstorydev/grpcurl", "cURL for gRPC"),
     ("buf", "bufbuild/buf", "Protobuf toolchain"),
-    // CI/CD
     ("goreleaser", "goreleaser/goreleaser", "Release automation"),
     ("earthly", "earthly/earthly", "Build automation"),
     ("dive", "wagoodman/dive", "Explore Docker image layers"),
@@ -1475,11 +1388,9 @@ static KNOWN_TOOLS: &[(&str, &str, &str)] = &[
         "google/go-containerregistry",
         "Container registry CLI",
     ),
-    // Shell / env
     ("starship", "starship-rs/starship", "Cross-shell prompt"),
     ("direnv", "direnv/direnv", "Per-directory env vars"),
     ("mise", "jdx/mise", "Dev tools version manager"),
-    // Python tooling
     ("uv", "astral-sh/uv", "Fast Python package manager"),
     ("uvx", "astral-sh/uv", "Run Python tools via uv"),
     ("ruff", "astral-sh/ruff", "Fast Python linter and formatter"),
@@ -1493,7 +1404,6 @@ fn known_tools() -> HashMap<&'static str, (&'static str, &'static str)> {
 /// Standard Unix tools, shell builtins, and language runtimes — never suggest these.
 fn system_builtins() -> HashSet<&'static str> {
     [
-        // Shells
         "bash",
         "sh",
         "zsh",
@@ -1505,7 +1415,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "ash",
         "nu",
         "elvish",
-        // Builtins
         "echo",
         "printf",
         "read",
@@ -1523,7 +1432,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "continue",
         "shift",
         "builtin",
-        // File ops
         "ls",
         "cat",
         "cp",
@@ -1544,7 +1452,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "dirname",
         "realpath",
         "readlink",
-        // Text processing
         "grep",
         "egrep",
         "fgrep",
@@ -1574,7 +1481,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "split",
         "csplit",
         "truncate",
-        // Archives
         "tar",
         "gzip",
         "gunzip",
@@ -1585,7 +1491,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "zip",
         "unzip",
         "zstd",
-        // Network
         "curl",
         "wget",
         "nc",
@@ -1596,20 +1501,17 @@ fn system_builtins() -> HashSet<&'static str> {
         "rsync",
         "ftp",
         "telnet",
-        // VCS
         "git",
         "svn",
         "hg",
         "cvs",
         "fossil",
-        // Build systems
         "make",
         "cmake",
         "ninja",
         "meson",
         "bazel",
         "ant",
-        // Python
         "python",
         "python3",
         "python2",
@@ -1620,7 +1522,6 @@ fn system_builtins() -> HashSet<&'static str> {
         "virtualenv",
         "conda",
         "mamba",
-        // Node.js
         "node",
         "nodejs",
         "npm",
@@ -1630,29 +1531,24 @@ fn system_builtins() -> HashSet<&'static str> {
         "deno",
         "bun",
         "tsc",
-        // Ruby
         "ruby",
         "gem",
         "bundle",
         "bundler",
         "rake",
-        // Go
         "go",
         "gofmt",
         "gopls",
-        // Rust
         "cargo",
         "rustc",
         "rustup",
         "rustfmt",
-        // JVM
         "javac",
         "java",
         "mvn",
         "gradle",
         "kotlin",
         "kotlinc",
-        // C/C++
         "clang",
         "clang++",
         "gcc",
@@ -1666,14 +1562,12 @@ fn system_builtins() -> HashSet<&'static str> {
         "strip",
         "ranlib",
         "ldd",
-        // Containers
         "docker",
         "podman",
         "buildah",
         "containerd",
         "runc",
         "skopeo",
-        // System utils
         "env",
         "printenv",
         "tee",
@@ -1927,8 +1821,6 @@ mod tests {
         assert!(!b.contains("fd"));
     }
 
-    // ── scan_binary_paths ──────────────────────────────────────────────────────
-
     #[test]
     fn binary_paths_detects_usr_bin() {
         let names = scan_binary_paths("run /usr/bin/jq --arg x y");
@@ -1951,7 +1843,6 @@ mod tests {
 
     #[test]
     fn binary_paths_skips_invalid_names() {
-        // "123bad" starts with a digit — invalid
         let names = scan_binary_paths("/usr/bin/123bad");
         assert!(names.is_empty());
     }
@@ -1960,8 +1851,6 @@ mod tests {
     fn binary_paths_handles_no_matches() {
         assert!(scan_binary_paths("no binary paths here").is_empty());
     }
-
-    // ── run_suggest return count ───────────────────────────────────────────────
 
     #[test]
     fn run_suggest_returns_zero_for_empty_scan() {
@@ -1991,7 +1880,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // Write a Python file that references a known tool via /usr/bin/
         let src = dir.join("script.py");
         fs::write(
             &src,
@@ -2020,7 +1908,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // Declare jq in grip.toml so it should be filtered out
         fs::write(
             dir.join("grip.toml"),
             "[binaries.jq]\nsource = \"github\"\nrepo = \"jqlang/jq\"\n",
@@ -2055,8 +1942,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // subprocess.run call should match the Python language scanner.
-        // Note: the scanner matches double-quoted list forms only.
         let src = dir.join("main.py");
         fs::write(
             &src,
@@ -2071,15 +1956,12 @@ mod tests {
             color: false,
         };
         let count = super::run_suggest(Some(dir.clone()), opts).unwrap();
-        // --check logic: if count > 0, caller exits 1.  We verify the count is non-zero.
         assert!(
             count > 0,
             "fd found via subprocess.run should result in a non-zero suggestion count"
         );
         let _ = fs::remove_dir_all(&dir);
     }
-
-    // ── classify ──────────────────────────────────────────────────────────────
 
     #[test]
     fn classify_lib_prefix() {
@@ -2251,8 +2133,6 @@ mod tests {
         assert_eq!(classify("hadolint"), EntryKind::Binary);
     }
 
-    // ── parse_dockerfile_content_typed ───────────────────────────────────────
-
     #[test]
     fn parse_simple_apt_list() {
         let content = "FROM debian:bookworm\nRUN apt-get install -y jq ripgrep\n";
@@ -2335,8 +2215,6 @@ mod tests {
         );
     }
 
-    // ── verify_packages_sync layer A ─────────────────────────────────────────
-
     #[test]
     fn verify_layer_a_known_tool_by_name() {
         let pkgs = vec![DockerfilePackage {
@@ -2352,7 +2230,6 @@ mod tests {
 
     #[test]
     fn verify_layer_a_package_to_cmd_mapping() {
-        // "ripgrep" maps to "rg" via PACKAGE_TO_CMD.
         let pkgs = vec![DockerfilePackage {
             name: "ripgrep".to_string(),
             version: None,
@@ -2368,16 +2245,12 @@ mod tests {
 
     #[test]
     fn verify_unknown_package_is_unverified() {
-        // Only considered unverified when apt-cache is also unavailable.
-        // On a machine without apt-cache this becomes unverified.
         let pkgs = vec![DockerfilePackage {
             name: "somecustom-internal-pkg-xyz".to_string(),
             version: None,
             manager: PkgManager::Apt,
         }];
         let (verified, unverified) = verify_packages_sync(pkgs);
-        // Depending on whether apt-cache is on host, it may end up verified or not.
-        // We only assert neither list is empty together.
         assert!(
             verified.len() + unverified.len() == 1,
             "exactly one outcome per package"
@@ -2403,8 +2276,6 @@ mod tests {
             manager: PkgManager::Apt,
         }];
         let (verified, _) = verify_packages_sync(pkgs);
-        // libssl-dev may or may not be in apt-cache on this host, but if verified
-        // it should be classified as Library.
         for v in &verified {
             assert_eq!(v.kind, EntryKind::Library, "libssl-dev must be Library");
         }

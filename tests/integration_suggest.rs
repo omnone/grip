@@ -22,7 +22,7 @@ fn grip_bin() -> PathBuf {
 fn suggest(dir: &Path, extra: &[&str]) -> Output {
     Command::new(grip_bin())
         .arg("--quiet")
-        .arg("--root")
+        .arg("--project")
         .arg(dir)
         .arg("suggest")
         .args(extra)

@@ -11,9 +11,9 @@ grip defends against the following scenarios:
 | Threat | Control |
 |--------|---------|
 | Compromised upstream release (tampered binary) | GPG signature verification, SHA-256 checksums |
-| Binary swapped on disk after install | `grip lock verify`, `grip check` SHA256 drift check |
-| Silent auto-upgrade to a compromised release | `--require-pins`, `grip check` unpinned entry warning |
-| Lock file hand-edited to remove hash checks | `grip check` missing-sha256 warning |
+| Binary swapped on disk after install | `grip lock verify`, `grip sync --check` SHA256 drift check |
+| Silent auto-upgrade to a compromised release | `--require-pins`, `grip sync --check` unpinned entry warning |
+| Lock file hand-edited to remove hash checks | `grip sync --check` missing-sha256 warning |
 | Cleartext MITM on download | HTTPS enforced by reqwest; `sha256` field in `grip.toml` |
 
 ---
@@ -163,9 +163,9 @@ Exits `1` if any binary fails. Suitable for CI.
 | In CI after `grip sync` | `grip lock verify` |
 | Periodic audit | `grip lock verify` |
 
-### Difference from `grip check`
+### Difference from `grip sync --check`
 
-| | `grip check` | `grip lock verify` |
+| | `grip sync --check` | `grip lock verify` |
 |---|---|---|
 | Reads | manifest + lock | lock file only |
 | Fails on | not-yet-installed entries | tampered/replaced binaries |
@@ -212,9 +212,9 @@ hint:  Pin each entry by adding a version: `grip add <name>@<version>`, ...
 
 ---
 
-## 4. `grip check` security checks
+## 4. `grip sync --check` security checks
 
-`grip check` reports the following security-relevant issues in addition to per-entry verification:
+`grip sync --check` reports the following security-relevant issues in addition to per-entry verification:
 
 | Check | What it detects |
 |-------|----------------|
@@ -225,8 +225,8 @@ hint:  Pin each entry by adding a version: `grip add <name>@<version>`, ...
 Run after `git pull` or as part of a pre-commit hook:
 
 ```sh
-grip pin    # pin any unpinned entries first
-grip check
+grip lock pin      # pin any unpinned entries first
+grip sync --check
 ```
 
 ---

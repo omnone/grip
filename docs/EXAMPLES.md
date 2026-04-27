@@ -258,8 +258,8 @@ Pinning ensures every developer and CI run installs exactly the same version of 
 ### Pin all unpinned entries at once
 
 ```sh
-grip sync            # install (resolves floating "latest" versions)
-grip pin             # write the resolved versions back into grip.toml
+grip sync                  # install (resolves floating "latest" versions)
+grip lock pin              # write the resolved versions back into grip.toml
 git add grip.toml grip.lock
 git commit -m "pin all tool versions"
 ```
@@ -267,28 +267,53 @@ git commit -m "pin all tool versions"
 ### Preview what would be pinned
 
 ```sh
-grip pin --dry-run
+grip lock pin --dry-run
 ```
 
-### Update a single tool
+### Check whether the lockfile is current
 
 ```sh
-grip add jq@1.7.1 --repo jqlang/jq --source github   # updates grip.toml
-grip sync                                              # re-installs
+grip lock --check          # exit 1 if a re-lock would change grip.lock
+```
+
+### See what has newer versions available
+
+```sh
+grip lock --upgrade --dry-run   # show outdated tools without writing anything
+```
+
+### Upgrade a single tool
+
+```sh
+grip lock --upgrade-package jq   # re-resolve jq to latest and update grip.lock
+grip sync                         # install the upgraded version
+```
+
+### Upgrade all tools
+
+```sh
+grip lock --upgrade    # re-resolve everything to latest and update grip.lock
+grip sync              # install upgraded versions
 ```
 
 ### Lock file commands
 
 ```sh
-grip lock verify   # re-hash every .bin/ binary against grip.lock; exits 1 on mismatch
+grip lock                # resolve versions from grip.toml → write grip.lock (no install)
+grip lock --check        # assert lock is up to date; exit 1 if stale
+grip lock pin            # write installed versions from grip.lock into grip.toml
+grip lock pin --dry-run  # preview what would be pinned
+grip lock verify         # re-hash every .bin/ binary against grip.lock; exits 1 on mismatch
 ```
 
 ### CI enforcement
 
 ```sh
-grip sync --locked --require-pins   # fail if lock would change OR any entry floats
-grip lock verify                    # catch tampering between sync and execution
-grip check                          # verify installed binaries match version + SHA-256
+grip suggest --check                  # fail if any tool is referenced but not declared
+grip lock --check                     # fail if grip.lock is stale
+grip sync --locked --require-pins     # install; fail if lock would change or any entry floats
+grip lock verify                      # detect tampering between sync and execution
+grip sync --check                     # verify installed binaries match version + SHA-256
 ```
 
 See also: [SECURITY.md — CI setup](SECURITY.md)

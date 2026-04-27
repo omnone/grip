@@ -26,7 +26,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use clap::Parser;
 use cli::{CacheAction, Cli, Commands, LockAction};
-use config::lockfile::LockFile;
+use config::lockfile::{LockEntry, LockFile};
 use config::manifest::{
     find_manifest_dir, AptEntry, BinaryEntry, DnfEntry, GithubEntry, LibAptEntry, LibDnfEntry,
     LibraryEntry, Manifest, UrlEntry,
@@ -52,19 +52,38 @@ async fn main() {
 }
 
 async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
-    let root = cli.root;
+    if let Some(ref dir) = cli.directory {
+        std::env::set_current_dir(dir)?;
+    }
+
+    if cli.no_cache {
+        // Setting GRIP_CACHE_DIR to empty string disables caching in cache::Cache::open().
+        std::env::set_var("GRIP_CACHE_DIR", "");
+    } else if let Some(ref cache_dir) = cli.cache_dir {
+        std::env::set_var("GRIP_CACHE_DIR", cache_dir);
+    }
+
+    let root = cli.project;
     let color_out = cfg.use_color_stdout();
     let color_err = cfg.use_color_stderr();
 
     match cli.command {
         Commands::Init {
+            path,
             from,
             yes,
-            no_import,
+            bare,
             offline,
-        } => cmd_init(from, yes, no_import, offline, &cfg).await?,
+        } => {
+            if let Some(ref p) = path {
+                std::fs::create_dir_all(p)?;
+                std::env::set_current_dir(p)?;
+            }
+            cmd_init(from, yes, bare, offline, &cfg).await?;
+        }
+
         Commands::Add {
-            name,
+            names,
             source,
             version,
             repo,
@@ -72,6 +91,8 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             package,
             binary,
             library,
+            no_sync,
+            frozen,
             gpg_fingerprint,
             sig_asset_pattern,
             checksums_asset_pattern,
@@ -80,44 +101,87 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
             checksums_sig_url,
         } => {
             let root_for_sync = root.clone();
-            cmd_add(
-                name,
-                source,
-                version,
-                repo,
-                url,
-                package,
-                binary,
-                library,
-                gpg_fingerprint,
-                sig_asset_pattern,
-                checksums_asset_pattern,
-                sig_url,
-                signed_checksums_url,
-                checksums_sig_url,
-                root,
-                &cfg,
-            )?;
-            let ui = installer::InstallOptions {
-                quiet: cfg.quiet,
-                colored: color_err,
-                interactive: std::io::stderr().is_terminal(),
-                require_pins: false,
-            };
-            let start = std::time::Instant::now();
-            let result = installer::run_install(false, false, None, root_for_sync, ui).await?;
-            let elapsed = start.elapsed().as_secs_f64();
-            print_install_result(&result, &cfg, color_out, color_err, elapsed);
-            if !result.failed.is_empty() {
-                std::process::exit(1);
+            for name in names {
+                cmd_add(
+                    name,
+                    source.clone(),
+                    version.clone(),
+                    repo.clone(),
+                    url.clone(),
+                    package.clone(),
+                    binary.clone(),
+                    library,
+                    gpg_fingerprint.clone(),
+                    sig_asset_pattern.clone(),
+                    checksums_asset_pattern.clone(),
+                    sig_url.clone(),
+                    signed_checksums_url.clone(),
+                    checksums_sig_url.clone(),
+                    root.clone(),
+                    &cfg,
+                )?;
+            }
+            if !frozen && !no_sync {
+                let ui = installer::InstallOptions {
+                    quiet: cfg.quiet,
+                    colored: color_err,
+                    interactive: std::io::stderr().is_terminal(),
+                    require_pins: false,
+                };
+                let start = std::time::Instant::now();
+                let result = installer::run_install(false, false, None, root_for_sync, ui).await?;
+                let elapsed = start.elapsed().as_secs_f64();
+                print_install_result(&result, &cfg, color_out, color_err, elapsed);
+                if !result.failed.is_empty() {
+                    std::process::exit(1);
+                }
             }
         }
+
+        Commands::Remove {
+            names,
+            library,
+            no_sync,
+            frozen,
+        } => {
+            for name in names {
+                cmd_remove(name, library, no_sync || frozen, root.clone(), &cfg)?;
+            }
+        }
+
+        Commands::Lock {
+            action,
+            check,
+            dry_run,
+            upgrade,
+            upgrade_package,
+            tag,
+        } => match action {
+            Some(LockAction::Verify) => {
+                cmd_lock_verify(root, &cfg, color_out, color_err)?;
+            }
+            Some(LockAction::Pin { dry_run: pin_dr }) => {
+                cmd_pin(pin_dr, root, &cfg)?;
+            }
+            None => {
+                cmd_lock_resolve(check, dry_run, upgrade, upgrade_package, tag, root, &cfg).await?;
+            }
+        },
+
         Commands::Sync {
             locked,
+            frozen,
+            check,
+            dry_run: _,
             verify,
             tag,
             require_pins,
         } => {
+            if check {
+                let r = checker::run_check(tag.as_deref(), root)?;
+                cmd_check_print(r, &cfg, color_out, color_err)?;
+                return Ok(());
+            }
             let start = std::time::Instant::now();
             let ui = installer::InstallOptions {
                 quiet: cfg.quiet,
@@ -125,49 +189,38 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 interactive: std::io::stderr().is_terminal(),
                 require_pins,
             };
-            let result = installer::run_install(locked, verify, tag.as_deref(), root, ui).await?;
+            let result =
+                installer::run_install(locked || frozen, verify, tag.as_deref(), root, ui).await?;
             let elapsed = start.elapsed().as_secs_f64();
             print_install_result(&result, &cfg, color_out, color_err, elapsed);
             if !result.failed.is_empty() {
                 std::process::exit(1);
             }
         }
-        Commands::Remove { name, library } => cmd_remove(name, library, root, &cfg)?,
-        Commands::Check { tag } => {
-            let r = checker::run_check(tag.as_deref(), root)?;
-            cmd_check_print(r, &cfg, color_out, color_err)?;
+
+        Commands::Run {
+            no_sync,
+            locked,
+            frozen,
+            args,
+        } => {
+            if !no_sync {
+                let ui = installer::InstallOptions {
+                    quiet: true,
+                    colored: color_err,
+                    interactive: false,
+                    require_pins: false,
+                };
+                let _ =
+                    installer::run_install(locked || frozen, false, None, root.clone(), ui).await;
+            }
+            cmd_run(args, root)?;
         }
-        Commands::Run { args } => cmd_run(args, root)?,
-        Commands::List { all } => cmd_list(root, all, &cfg)?,
-        Commands::Update { name, all } => cmd_update(name, all, root, &cfg).await?,
-        Commands::Outdated { tag } => cmd_outdated(tag, root, &cfg).await?,
-        Commands::Pin { dry_run } => cmd_pin(dry_run, root, &cfg)?,
-        Commands::Env { shell } => cmd_env(shell, root, &cfg)?,
+
+        Commands::Tree { all } => cmd_list(root, all, &cfg)?,
+
         Commands::Cache { action } => cmd_cache(action, &cfg)?,
-        Commands::Lock { action } => cmd_lock(action, root, &cfg)?,
-        Commands::Export { format } => cmd_export(&format, root, &cfg)?,
-        Commands::Sbom { format, output } => {
-            let fmt = match format.as_str() {
-                "spdx" => SbomFormat::Spdx,
-                _ => SbomFormat::CycloneDx,
-            };
-            sbom::run_sbom(
-                root,
-                sbom::SbomOptions {
-                    format: fmt,
-                    output,
-                },
-            )?;
-        }
-        Commands::Audit { no_fail } => {
-            audit::run_audit(audit::AuditOptions {
-                fail: !no_fail,
-                root,
-                quiet: cfg.quiet,
-                color: color_out,
-            })
-            .await?;
-        }
+
         Commands::Suggest {
             paths,
             history,
@@ -191,6 +244,36 @@ async fn run_command(cli: Cli, cfg: OutputCfg) -> Result<(), GripError> {
                 std::process::exit(1);
             }
         }
+
+        Commands::Export { format, output } => match format.as_str() {
+            "cyclonedx" | "spdx" => {
+                let fmt = if format == "spdx" {
+                    SbomFormat::Spdx
+                } else {
+                    SbomFormat::CycloneDx
+                };
+                sbom::run_sbom(
+                    root,
+                    sbom::SbomOptions {
+                        format: fmt,
+                        output,
+                    },
+                )?;
+            }
+            _ => cmd_export(&format, output, root, &cfg)?,
+        },
+
+        Commands::Audit { no_fail } => {
+            audit::run_audit(audit::AuditOptions {
+                fail: !no_fail,
+                root,
+                quiet: cfg.quiet,
+                color: color_out,
+            })
+            .await?;
+        }
+
+        Commands::Env { shell } => cmd_env(shell, root, &cfg)?,
     }
 
     Ok(())
@@ -313,7 +396,7 @@ fn cmd_check_print(
 async fn cmd_init(
     from: Vec<std::path::PathBuf>,
     yes: bool,
-    no_import: bool,
+    bare: bool,
     offline: bool,
     cfg: &OutputCfg,
 ) -> Result<(), GripError> {
@@ -368,7 +451,7 @@ async fn cmd_init(
         }
     }
 
-    if no_import {
+    if bare {
         if !cfg.quiet {
             println!(
                 "hint: {}",
@@ -674,7 +757,6 @@ fn detect_from_image(content: &str) -> Option<String> {
             if rest.starts_with('$') || rest.starts_with("${") {
                 return None;
             }
-            // Take only the image ref, not the AS alias.
             let image = rest.split_whitespace().next()?;
             return Some(image.to_string());
         }
@@ -887,9 +969,13 @@ fn cmd_add(
 }
 
 /// Remove a binary or library entry from `grip.toml`, `grip.lock`, and `.bin/`.
+///
+/// When `no_sync` is `true` the `.bin/` symlinks are left untouched (the entry is
+/// removed from the manifest and lockfile only).
 fn cmd_remove(
     name: String,
     library: bool,
+    no_sync: bool,
     root: Option<std::path::PathBuf>,
     cfg: &OutputCfg,
 ) -> Result<(), GripError> {
@@ -924,7 +1010,6 @@ fn cmd_remove(
         }
         manifest.binaries.shift_remove(&name);
 
-        // Collect extra binaries before removing the lock entry.
         let extra_binaries: Vec<String> = lock
             .get(&name)
             .map(|e| e.extra_binaries.clone())
@@ -932,24 +1017,24 @@ fn cmd_remove(
 
         lock.remove(&name);
 
-        // Remove the primary symlink / binary from .bin/ if present.
-        let bin_path = bin_dir.join(&name);
-        if bin_path.exists() || bin_path.symlink_metadata().is_ok() {
-            std::fs::remove_file(&bin_path)?;
-            if !cfg.quiet {
-                let check = output::success_checkmark(color);
-                println!("  {check}  removed .bin/{name}");
-            }
-        }
-
-        // Remove any extra binary symlinks recorded in the lock entry.
-        for extra in &extra_binaries {
-            let extra_path = bin_dir.join(extra);
-            if extra_path.exists() || extra_path.symlink_metadata().is_ok() {
-                std::fs::remove_file(&extra_path)?;
+        if !no_sync {
+            let bin_path = bin_dir.join(&name);
+            if bin_path.exists() || bin_path.symlink_metadata().is_ok() {
+                std::fs::remove_file(&bin_path)?;
                 if !cfg.quiet {
                     let check = output::success_checkmark(color);
-                    println!("  {check}  removed .bin/{extra}");
+                    println!("  {check}  removed .bin/{name}");
+                }
+            }
+
+            for extra in &extra_binaries {
+                let extra_path = bin_dir.join(extra);
+                if extra_path.exists() || extra_path.symlink_metadata().is_ok() {
+                    std::fs::remove_file(&extra_path)?;
+                    if !cfg.quiet {
+                        let check = output::success_checkmark(color);
+                        println!("  {check}  removed .bin/{extra}");
+                    }
                 }
             }
         }
@@ -1134,7 +1219,6 @@ fn cmd_list(root: Option<std::path::PathBuf>, all: bool, cfg: &OutputCfg) -> Res
         return Ok(());
     }
 
-    // Default: lock-only view.
     if lock.entries.is_empty() && lock.library_entries.is_empty() {
         if !cfg.quiet {
             println!("No binaries or libraries installed yet.");
@@ -1247,7 +1331,6 @@ async fn cmd_outdated(
         .build()
         .map_err(GripError::Http)?;
 
-    // Resolve all latest versions concurrently.
     let mut futs: FuturesUnordered<_> = entries
         .iter()
         .map(|(name, entry)| {
@@ -1268,7 +1351,6 @@ async fn cmd_outdated(
         latest_map.insert(name, result.ok());
     }
 
-    // Column widths.
     let name_w = entries
         .iter()
         .map(|(n, _)| n.len())
@@ -1352,7 +1434,6 @@ async fn cmd_outdated(
             }
         }
 
-        // ── Libraries section ───────────────────────────────────────────────
         let lib_entries: Vec<(&String, &config::manifest::LibraryEntry)> = manifest
             .libraries
             .iter()
@@ -1408,7 +1489,6 @@ async fn cmd_outdated(
             }
         }
     } else {
-        // Quiet / machine-readable: tab-separated lines — name, installed, latest, status.
         let norm = |s: &str| s.trim_start_matches('v').to_lowercase();
         for (name, _) in &entries {
             let installed = lock.get(name).map(|e| e.version.as_str()).unwrap_or("-");
@@ -1461,71 +1541,228 @@ async fn cmd_outdated(
     Ok(())
 }
 
-/// Check consistency between `grip.toml`, `grip.lock`, and `.bin/`.
-fn cmd_lock(
-    action: LockAction,
+/// `grip lock verify` — re-hash every binary in `.bin/` against `grip.lock`.
+fn cmd_lock_verify(
+    root: Option<std::path::PathBuf>,
+    cfg: &OutputCfg,
+    color_out: bool,
+    color_err: bool,
+) -> Result<(), GripError> {
+    let r = lock_verify::run_lock_verify(root)?;
+
+    if !cfg.quiet {
+        println!();
+        let header = output::dim(color_out, "grip lock verify");
+        println!("  {header}");
+        println!();
+
+        for name in &r.verified {
+            let mark = output::success_checkmark(color_out);
+            println!("  {mark}  {name}");
+        }
+        for name in &r.no_checksum {
+            let g = output::warn_glyph(color_err);
+            let note = output::dim(color_out, "(no sha256 in lock — cannot verify)");
+            println!("  {g}  {name}  {note}");
+        }
+        for (name, msg) in &r.failed {
+            let x = output::fail_glyph(color_err);
+            eprintln!("  {x}  {name}: {msg}");
+        }
+
+        let n_ok = r.verified.len();
+        let n_skip = r.no_checksum.len();
+        let n_fail = r.failed.len();
+
+        let summary = if n_fail > 0 {
+            output::red(
+                color_out,
+                &format!("{n_fail} mismatch(es) detected — possible tampering!"),
+            )
+        } else if n_ok == 0 && n_skip == 0 {
+            output::dim(color_out, "No binaries in grip.lock")
+        } else if n_skip > 0 {
+            format!(
+                "{}  ({} verified, {} without sha256)",
+                output::green(color_out, "OK"),
+                n_ok,
+                n_skip,
+            )
+        } else {
+            output::green(color_out, &format!("All {n_ok} binaries verified"))
+        };
+        println!("\n  {summary}");
+        println!();
+    } else {
+        for (name, msg) in &r.failed {
+            eprintln!("error: {name}: {msg}");
+        }
+    }
+
+    if !r.failed.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `grip lock` (no subcommand) — resolve versions and update `grip.lock` without installing.
+///
+/// - plain: resolve every entry and write grip.lock
+/// - `--check`: assert lock is up to date (compare manifest ↔ lock; exit 1 if any entry is absent)
+/// - `--dry-run`: show what would change without writing
+/// - `--upgrade` / `--upgrade-package`: re-resolve to latest then re-install
+async fn cmd_lock_resolve(
+    check: bool,
+    dry_run: bool,
+    upgrade: bool,
+    upgrade_package: Vec<String>,
+    tag: Option<String>,
     root: Option<std::path::PathBuf>,
     cfg: &OutputCfg,
 ) -> Result<(), GripError> {
-    match action {
-        LockAction::Verify => {
-            let color = cfg.use_color_stdout();
-            let r = lock_verify::run_lock_verify(root)?;
+    let project_root = match root.clone() {
+        Some(r) => r,
+        None => {
+            let cwd = std::env::current_dir()?;
+            find_manifest_dir(&cwd).ok_or(GripError::ManifestNotFound)?
+        }
+    };
 
-            if !cfg.quiet {
-                println!();
-                let header = output::dim(color, "grip lock verify");
-                println!("  {header}");
-                println!();
+    if !upgrade_package.is_empty() {
+        for name in upgrade_package {
+            cmd_update_one(name, &project_root, cfg).await?;
+        }
+        return Ok(());
+    }
 
-                for name in &r.verified {
-                    let mark = output::success_checkmark(color);
-                    println!("  {mark}  {name}");
-                }
-                for name in &r.no_checksum {
-                    let g = output::warn_glyph(color);
-                    let note = output::dim(color, "(no sha256 in lock — cannot verify)");
-                    println!("  {g}  {name}  {note}");
-                }
-                for (name, msg) in &r.failed {
-                    let x = output::fail_glyph(color);
-                    eprintln!("  {x}  {name}: {msg}");
-                }
+    if upgrade {
+        cmd_update_all(&project_root, cfg).await?;
+        return Ok(());
+    }
 
-                let n_ok = r.verified.len();
-                let n_skip = r.no_checksum.len();
-                let n_fail = r.failed.len();
+    if check || dry_run {
+        cmd_outdated(tag, root, cfg).await?;
+        return Ok(());
+    }
 
-                let summary = if n_fail > 0 {
-                    output::red(
-                        color,
-                        &format!("{n_fail} mismatch(es) detected — possible tampering!"),
-                    )
-                } else if n_ok == 0 && n_skip == 0 {
-                    output::dim(color, "No binaries in grip.lock")
-                } else if n_skip > 0 {
-                    format!(
-                        "{}  ({} verified, {} without sha256)",
-                        output::green(color, "OK"),
-                        n_ok,
-                        n_skip,
-                    )
-                } else {
-                    output::green(color, &format!("All {n_ok} binaries verified"))
-                };
-                println!("\n  {summary}");
-                println!();
-            } else {
-                for (name, msg) in &r.failed {
-                    eprintln!("error: {name}: {msg}");
-                }
+    let manifest_path = project_root.join("grip.toml");
+    let lock_path = project_root.join("grip.lock");
+    let color_out = cfg.use_color_stdout();
+
+    let manifest = Manifest::load(&manifest_path)?;
+    let mut lock = LockFile::load(&lock_path)?;
+
+    if manifest.binaries.is_empty() && manifest.libraries.is_empty() {
+        if !cfg.quiet {
+            println!("grip.toml is empty — nothing to lock.");
+        }
+        return Ok(());
+    }
+
+    let platform = crate::platform::Platform::current();
+    let entries: Vec<(String, BinaryEntry)> = manifest
+        .binaries
+        .iter()
+        .filter(|(_, e)| e.meta().matches_platform(platform.os_str()))
+        .filter(|(_, e)| tag.as_deref().map(|t| e.meta().has_tag(t)).unwrap_or(true))
+        .filter(|(name, _)| lock.get(name).is_none())
+        .map(|(n, e)| (n.clone(), e.clone()))
+        .collect();
+
+    if entries.is_empty() {
+        if !cfg.quiet {
+            let msg = output::dim(color_out, "Lockfile is already up to date.");
+            println!("\n  {msg}");
+        }
+        return Ok(());
+    }
+
+    if !cfg.quiet {
+        let header = output::dim(color_out, "Resolving versions…");
+        println!("\n  {header}\n");
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("grip/0.1")
+        .build()
+        .map_err(GripError::Http)?;
+
+    let mut futs: futures::stream::FuturesUnordered<_> = entries
+        .iter()
+        .map(|(name, entry)| {
+            let name = name.clone();
+            let entry = entry.clone();
+            let client = client.clone();
+            async move {
+                let adapter = crate::adapters::get_adapter(&entry, None);
+                let result = adapter.resolve_latest(&entry, &client).await;
+                (name, result)
             }
+        })
+        .collect();
 
-            if !r.failed.is_empty() {
-                std::process::exit(1);
+    let mut resolved: Vec<(String, String, String)> = Vec::new(); // (name, version, source)
+    while let Some((name, result)) = futs.next().await {
+        match result {
+            Ok(version) => {
+                let source = match manifest.binaries.get(&name) {
+                    Some(BinaryEntry::Apt(_)) => "apt",
+                    Some(BinaryEntry::Dnf(_)) => "dnf",
+                    Some(BinaryEntry::Github(_)) => "github",
+                    Some(BinaryEntry::Url(_)) => "url",
+                    None => "unknown",
+                };
+                if !cfg.quiet {
+                    let mark = output::success_checkmark(color_out);
+                    println!("  {mark}  {name}  →  {version}");
+                }
+                resolved.push((name, version, source.to_string()));
+            }
+            Err(e) => {
+                if !cfg.quiet {
+                    let g = output::warn_glyph(cfg.use_color_stderr());
+                    eprintln!("  {g}  {name}: could not resolve — {e}");
+                }
             }
         }
     }
+
+    if !dry_run {
+        for (name, version, source) in &resolved {
+            lock.upsert(LockEntry {
+                name: name.clone(),
+                version: version.clone(),
+                source: source.clone(),
+                url: None,
+                sha256: None,
+                installed_at: chrono::Utc::now(),
+                extra_binaries: vec![],
+                auto_binary: None,
+                auto_extra_binaries: vec![],
+            });
+        }
+        lock.save(&lock_path)?;
+    }
+
+    if !cfg.quiet && !resolved.is_empty() {
+        let n = resolved.len();
+        let suffix = if dry_run { " (dry run)" } else { "" };
+        let summary = output::green(
+            color_out,
+            &format!(
+                "{n} entr{} written to grip.lock{suffix}",
+                if n == 1 { "y" } else { "ies" }
+            ),
+        );
+        println!("\n  {summary}");
+        if !dry_run {
+            println!(
+                "  {}",
+                output::dim(color_out, "Run `grip sync` to install.")
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -1552,7 +1789,6 @@ fn cmd_pin(
     let mut pinned: Vec<(String, String)> = Vec::new();
     let mut not_installed: Vec<String> = Vec::new();
 
-    // Collect pins for binaries first (can't iterate + mutate at same time).
     let bin_pins: Vec<(String, Option<String>)> = manifest
         .binaries
         .iter()
@@ -1577,7 +1813,6 @@ fn cmd_pin(
         }
     }
 
-    // Collect pins for libraries.
     let lib_pins: Vec<(String, Option<String>)> = manifest
         .libraries
         .iter()
@@ -1739,33 +1974,6 @@ fn cmd_env(
     Ok(())
 }
 
-/// Re-install one or all binaries/libraries from the manifest and update their lock entries.
-async fn cmd_update(
-    name: Option<String>,
-    all: bool,
-    root: Option<std::path::PathBuf>,
-    cfg: &OutputCfg,
-) -> Result<(), GripError> {
-    let project_root = match root {
-        Some(r) => r,
-        None => {
-            let cwd = std::env::current_dir()?;
-            find_manifest_dir(&cwd).ok_or(GripError::ManifestNotFound)?
-        }
-    };
-
-    match (name, all) {
-        (Some(n), false) => cmd_update_one(n, &project_root, cfg).await,
-        (None, true) => cmd_update_all(&project_root, cfg).await,
-        (Some(_), true) => Err(GripError::Other(
-            "pass either a name or --all, not both".into(),
-        )),
-        (None, false) => Err(GripError::Other(
-            "specify a binary name or pass --all to update everything".into(),
-        )),
-    }
-}
-
 async fn cmd_update_one(
     name: String,
     project_root: &std::path::Path,
@@ -1800,7 +2008,6 @@ async fn cmd_update_one(
         pb
     };
 
-    // Check libraries first, then binaries.
     if let Some(lib_entry) = manifest.libraries.get(&name).cloned() {
         let old_version = lock.get_library(&name).map(|e| e.version.clone());
         let lock_entry = match &lib_entry {
@@ -1894,14 +2101,12 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
     };
     let bin_dir = std::sync::Arc::new(bin_dir);
 
-    // Snapshot old versions so we can report "already at latest" after re-install.
     let old_bin_versions: std::collections::HashMap<String, String> = manifest
         .binaries
         .keys()
         .filter_map(|n| lock.get(n).map(|e| (n.clone(), e.version.clone())))
         .collect();
 
-    // --- binaries (concurrent) ---
     let mut bin_futs: FuturesUnordered<_> = manifest
         .binaries
         .iter()
@@ -1978,7 +2183,6 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
         }
     }
 
-    // --- libraries (sequential, need privilege) ---
     for (name, lib_entry) in &manifest.libraries {
         let old_lib_version = lock.get_library(name).map(|e| e.version.clone());
         let pb = if cfg.quiet {
@@ -2078,16 +2282,35 @@ async fn cmd_update_all(project_root: &std::path::Path, cfg: &OutputCfg) -> Resu
 
 fn cmd_cache(action: CacheAction, cfg: &OutputCfg) -> Result<(), GripError> {
     let color = cfg.use_color_stdout();
+
+    if matches!(action, CacheAction::Dir) {
+        match std::env::var("GRIP_CACHE_DIR") {
+            Ok(val) if val.is_empty() => {
+                if !cfg.quiet {
+                    println!("Cache is disabled (GRIP_CACHE_DIR is empty).");
+                }
+            }
+            Ok(val) => println!("{val}"),
+            Err(_) => {
+                let dir = std::env::var("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".cache/grip/downloads"))
+                    .unwrap_or_else(|_| std::env::temp_dir().join("grip-cache"));
+                println!("{}", dir.display());
+            }
+        }
+        return Ok(());
+    }
+
     match cache::Cache::open() {
         None => {
             if !cfg.quiet {
                 println!("Cache is disabled (GRIP_CACHE_DIR is set to empty string).");
             }
-            return Ok(());
         }
         Some(Err(e)) => return Err(e),
         Some(Ok(c)) => match action {
-            CacheAction::Clean => {
+            CacheAction::Dir => unreachable!("handled above"),
+            CacheAction::Clean | CacheAction::Prune => {
                 let (count, bytes) = c.clean()?;
                 if cfg.quiet {
                     println!("{count} {bytes}");
@@ -2100,7 +2323,7 @@ fn cmd_cache(action: CacheAction, cfg: &OutputCfg) -> Result<(), GripError> {
                     );
                 }
             }
-            CacheAction::Info => {
+            CacheAction::Size => {
                 let (count, bytes) = c.stats();
                 if cfg.quiet {
                     println!("{count} {bytes}");
@@ -2117,6 +2340,7 @@ fn cmd_cache(action: CacheAction, cfg: &OutputCfg) -> Result<(), GripError> {
 
 fn cmd_export(
     format: &str,
+    output: Option<std::path::PathBuf>,
     root: Option<std::path::PathBuf>,
     cfg: &OutputCfg,
 ) -> Result<(), GripError> {
@@ -2130,10 +2354,8 @@ fn cmd_export(
     let manifest = Manifest::load(&project_root.join("grip.toml"))?;
     let lock = LockFile::load(&project_root.join("grip.lock"))?;
 
-    // Collect apt/dnf package specs (binaries + libraries combined)
     let mut apt_pkgs: Vec<String> = Vec::new();
     let mut dnf_pkgs: Vec<String> = Vec::new();
-    // (name, url) for curl-based installs
     let mut curl_installs: Vec<(String, String)> = Vec::new();
 
     for (name, entry) in &manifest.binaries {
@@ -2206,73 +2428,98 @@ fn cmd_export(
         }
     }
 
-    // Issue 7: sort for reproducible, diff-friendly output.
     apt_pkgs.sort();
     dnf_pkgs.sort();
 
+    let mut buf = String::new();
+    use std::fmt::Write as FmtWrite;
+
     match format {
         "dockerfile" => {
-            println!("# Generated by grip export --format dockerfile");
+            writeln!(buf, "# Generated by grip export --format dockerfile").ok();
             if !apt_pkgs.is_empty() {
                 let pkgs = apt_pkgs.join(" \\\n    ");
-                println!("RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\");
-                println!("    {pkgs} \\");
-                println!("    && rm -rf /var/lib/apt/lists/*");
+                writeln!(buf, "RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\").ok();
+                writeln!(buf, "    {pkgs} \\").ok();
+                writeln!(buf, "    && rm -rf /var/lib/apt/lists/*").ok();
             }
             if !dnf_pkgs.is_empty() {
                 let pkgs = dnf_pkgs.join(" \\\n    ");
-                println!("RUN dnf install -y \\");
-                println!("    {pkgs} \\");
-                println!("    && dnf clean all");
+                writeln!(buf, "RUN dnf install -y \\").ok();
+                writeln!(buf, "    {pkgs} \\").ok();
+                writeln!(buf, "    && dnf clean all").ok();
             }
             for (name, url) in &curl_installs {
-                println!("RUN curl -fsSL -o /usr/local/bin/{name} \\\n    \"{url}\" \\");
-                println!("    && chmod +x /usr/local/bin/{name}");
+                writeln!(
+                    buf,
+                    "RUN curl -fsSL -o /usr/local/bin/{name} \\\n    \"{url}\" \\"
+                )
+                .ok();
+                writeln!(buf, "    && chmod +x /usr/local/bin/{name}").ok();
             }
         }
         "makefile" => {
-            println!("# Generated by grip export --format makefile");
-            println!(".PHONY: install-deps");
-            println!("install-deps:");
+            writeln!(buf, "# Generated by grip export --format makefile").ok();
+            writeln!(buf, ".PHONY: install-deps").ok();
+            writeln!(buf, "install-deps:").ok();
             if !apt_pkgs.is_empty() {
-                println!("\tapt-get update");
+                writeln!(buf, "\tapt-get update").ok();
                 let pkgs = apt_pkgs.join(" \\\n\t\t");
-                println!("\tDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\\n\t\t{pkgs}");
+                writeln!(buf, "\tDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\\n\t\t{pkgs}").ok();
             }
             if !dnf_pkgs.is_empty() {
                 let pkgs = dnf_pkgs.join(" \\\n\t\t");
-                println!("\tdnf install -y \\\n\t\t{pkgs}");
-                println!("\tdnf clean all");
+                writeln!(buf, "\tdnf install -y \\\n\t\t{pkgs}").ok();
+                writeln!(buf, "\tdnf clean all").ok();
             }
             for (name, url) in &curl_installs {
-                println!("\tcurl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
+                writeln!(
+                    buf,
+                    "\tcurl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}"
+                )
+                .ok();
             }
         }
         _ => {
-            // default: shell script
-            println!("#!/bin/sh");
-            println!("# Generated by grip export --format shell");
-            println!("set -eu");
+            writeln!(buf, "#!/bin/sh").ok();
+            writeln!(buf, "# Generated by grip export --format shell").ok();
+            writeln!(buf, "set -eu").ok();
             if !apt_pkgs.is_empty() {
                 let pkgs = apt_pkgs.join(" \\\n  ");
-                println!("apt-get update");
-                println!(
+                writeln!(buf, "apt-get update").ok();
+                writeln!(
+                    buf,
                     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\"
-                );
-                println!("  {pkgs}");
+                )
+                .ok();
+                writeln!(buf, "  {pkgs}").ok();
             }
             if !dnf_pkgs.is_empty() {
                 let pkgs = dnf_pkgs.join(" \\\n  ");
-                println!("dnf install -y \\");
-                println!("  {pkgs}");
+                writeln!(buf, "dnf install -y \\").ok();
+                writeln!(buf, "  {pkgs}").ok();
             }
             for (name, url) in &curl_installs {
-                println!("curl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}");
+                writeln!(
+                    buf,
+                    "curl -fsSL -o /usr/local/bin/{name} \"{url}\" && chmod +x /usr/local/bin/{name}"
+                )
+                .ok();
             }
         }
     }
 
-    let _ = cfg;
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &buf)?;
+            if !cfg.quiet {
+                let color = cfg.use_color_stdout();
+                let mark = output::success_checkmark(color);
+                println!("  {mark}  Wrote {} to {}", format, path.display());
+            }
+        }
+        None => print!("{buf}"),
+    }
     Ok(())
 }
 
@@ -2357,8 +2604,6 @@ mod tests {
         }
     }
 
-    // ── parse_name_at_version ─────────────────────────────────────────────────
-
     #[test]
     fn parse_plain_name() {
         let (stem, ver) = parse_name_at_version("jq".into());
@@ -2382,20 +2627,16 @@ mod tests {
 
     #[test]
     fn parse_trailing_at_returns_no_version() {
-        // "@" at the end with nothing after — version is None and the "@" is stripped from stem.
         let (stem, ver) = parse_name_at_version("jq@".into());
         assert_eq!(stem, "jq");
         assert!(ver.is_none());
     }
-
-    // ── cmd_remove ────────────────────────────────────────────────────────────
 
     #[test]
     fn cmd_remove_also_removes_extra_binaries() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
 
-        // Minimal grip.toml with one dnf entry.
         std::fs::write(
             root.join("grip.toml"),
             r#"[binaries]
@@ -2404,7 +2645,6 @@ chromium = { source = "dnf", package = "chromium-browser" }
         )
         .unwrap();
 
-        // grip.lock with extra_binaries recorded.
         std::fs::write(
             root.join("grip.lock"),
             r#"[[binary]]
@@ -2418,7 +2658,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         )
         .unwrap();
 
-        // Create the .bin/ directory with fake symlinks.
         let bin_dir = root.join(".bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         for name in &["chromium", "chromium-browser", "chromedriver"] {
@@ -2427,6 +2666,7 @@ extra_binaries = ["chromium-browser", "chromedriver"]
 
         cmd_remove(
             "chromium".into(),
+            false,
             false,
             Some(root.to_path_buf()),
             &silent_cfg(),
@@ -2447,8 +2687,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         );
     }
 
-    // ── format_bytes ──────────────────────────────────────────────────────────
-
     #[test]
     fn format_bytes_under_1024() {
         assert_eq!(format_bytes(512), "512 B");
@@ -2464,8 +2702,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
     }
 
-    // ── cmd_add owner/repo shorthand ─────────────────────────────────────────
-
     #[test]
     fn add_owner_repo_shorthand_writes_github_entry() {
         let tmp = TempDir::new().unwrap();
@@ -2473,19 +2709,19 @@ extra_binaries = ["chromium-browser", "chromedriver"]
 
         cmd_add(
             "BurntSushi/ripgrep".into(),
-            None,  // source: None — must be inferred as github
-            None,  // version
-            None,  // repo
-            None,  // url
-            None,  // package
-            None,  // binary
-            false, // library
-            None,  // gpg_fingerprint
-            None,  // sig_asset_pattern
-            None,  // checksums_asset_pattern
-            None,  // sig_url
-            None,  // signed_checksums_url
-            None,  // checksums_sig_url
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             Some(tmp.path().to_path_buf()),
             &silent_cfg(),
         )
@@ -2530,8 +2766,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         assert!(err.to_string().contains("--source is 'apt'"));
     }
 
-    // ── detect_from_image ─────────────────────────────────────────────────────
-
     #[test]
     fn detect_from_image_plain() {
         assert_eq!(
@@ -2564,8 +2798,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         let content = "FROM ubuntu:22.04\nFROM alpine:3.18\n";
         assert_eq!(detect_from_image(content), Some("ubuntu:22.04".to_string()));
     }
-
-    // ── find_dockerfiles ──────────────────────────────────────────────────────
 
     #[test]
     fn find_dockerfiles_detects_standard_name() {
@@ -2610,8 +2842,6 @@ extra_binaries = ["chromium-browser", "chromedriver"]
         let tmp = TempDir::new().unwrap();
         assert!(find_dockerfiles(tmp.path()).is_empty());
     }
-
-    // ── sync empty-manifest hint ──────────────────────────────────────────────
 
     #[tokio::test]
     async fn sync_empty_manifest_returns_empty_result() {

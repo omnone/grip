@@ -31,7 +31,7 @@ fn setup_project(toml: &str) -> TempDir {
 fn grip(dir: &Path, args: &[&str]) -> Output {
     Command::new(grip_bin())
         .arg("--quiet")
-        .arg("--root")
+        .arg("--project")
         .arg(dir)
         .args(args)
         .output()
@@ -80,7 +80,7 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
     );
 }
 
-/// `grip check` passes after a successful `grip sync`.
+/// `grip sync --check` passes after a successful `grip sync`.
 #[test]
 #[ignore]
 fn url_check_passes_after_sync() {
@@ -96,10 +96,10 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
     ));
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
-    assert_success(&grip(project.path(), &["check"]), "grip check");
+    assert_success(&grip(project.path(), &["sync", "--check"]), "grip sync --check");
 }
 
-/// `grip list` shows the installed entry after sync.
+/// `grip tree` shows the installed entry after sync.
 #[test]
 #[ignore]
 fn url_list_shows_installed_entry() {
@@ -116,12 +116,12 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
 
     assert_success(&grip(project.path(), &["sync"]), "grip sync");
 
-    let out = grip(project.path(), &["list"]);
-    assert_success(&out, "grip list");
+    let out = grip(project.path(), &["tree"]);
+    assert_success(&out, "grip tree");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("jq"),
-        "expected 'jq' in grip list output, got: {stdout}"
+        "expected 'jq' in grip tree output, got: {stdout}"
     );
 }
 
@@ -194,10 +194,10 @@ jq = {{ source = "url", url = "{JQ_URL}" }}
         !project.path().join(".bin/jq").exists(),
         ".bin/jq still exists after remove"
     );
-    let out = grip(project.path(), &["list"]);
+    let out = grip(project.path(), &["tree"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains("jq"),
-        "jq still appears in grip list after remove"
+        "jq still appears in grip tree after remove"
     );
 }
