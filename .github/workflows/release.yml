@@ -21,9 +21,38 @@ jobs:
 
       - run: cargo test
 
+  integration-test:
+    name: Integration test (${{ matrix.suite }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: apt
+            dockerfile: tests/docker/Dockerfile.test-apt
+            image: grip-test-apt
+          - suite: dnf
+            dockerfile: tests/docker/Dockerfile.test-dnf
+            image: grip-test-dnf
+          - suite: github
+            dockerfile: tests/docker/Dockerfile.test-github
+            image: grip-test-github
+          - suite: url
+            dockerfile: tests/docker/Dockerfile.test-url
+            image: grip-test-url
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Build test image
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }} .
+
+      - name: Run integration tests
+        run: docker run --rm -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} ${{ matrix.image }}
+
   build:
     name: Build ${{ matrix.target }}
-    needs: test
+    needs: [test, integration-test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
