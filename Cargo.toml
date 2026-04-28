@@ -1,6 +1,6 @@
 [package]
 name = "grip"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -31,3 +31,6 @@ tempfile = "3"
 futures = "0.3"
 semver = "1"
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
